@@ -1,0 +1,92 @@
+name: Release
+
+# Obsidian installs a plugin by downloading manifest.json, main.js and
+# styles.css as release *assets*. A release without them cannot be installed by
+# Obsidian or by BRAT, so attaching them is not optional — this workflow makes
+# it automatic instead of something to remember.
+on:
+  push:
+    tags:
+      - "*"
+  # Lets you re-run the packaging for an existing tag from the Actions tab
+  # without having to delete and re-push the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)package"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Passed through env rather than interpolated straight into the shell, so
+      # a tag name can never be parsed as script.
+      - name: Resolve tag
+        id: tag
+        env:
+          REQUESTED: ${{ inputs.tag || github.ref_name }}
+        run: echo "name=$REQUESTED" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Guard against the classic release bug: a tag that does not match the
+      # version Obsidian reads out of manifest.json. Obsidian trusts the
+      # manifest, so a mismatch ships an install that reports the wrong version
+      # and never offers an update. A leading "v" on the tag is tolerated.
+      - name: Check manifest version matches the tag
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          manifest_version=$(node -p "require('./manifest.json').version")
+          expected="${TAG#v}"
+          if [ "$manifest_version" != "$expected" ]; then
+            echo "::error::Tag is '$TAG' but manifest.json says '$manifest_version'."
+            echo "::error::Update manifest.json (and versions.json) to $expected, or retag."
+            exit 1
+          fi
+          echo "manifest.json version $manifest_version matches tag $TAG"
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify the build produced every asset
+        run: |
+          for file in manifest.json main.js styles.css; do
+            if [ ! -s "$file" ]; then
+              echo "::error::$file is missing or empty after the build"
+              exit 1
+            fi
+          done
+          ls -l manifest.json main.js styles.css
+
+      # Idempotent: creates the release on a fresh tag, and re-uploads over the
+      # existing assets when re-run for a tag that already has one.
+      - name: Publish assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — replacing its assets."
+            gh release upload "$TAG" manifest.json main.js styles.css --clobber
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" manifest.json main.js styles.css \
+              --title "$TAG" \
+              --generate-notes
+          fi

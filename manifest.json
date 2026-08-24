@@ -1,0 +1,9 @@
+{
+	"id": "flashcard-core",
+	"name": "Flashcard Core",
+	"version": "0.1.0",
+	"minAppVersion": "1.9.0",
+	"description": "Generic FSRS-backed flashcard engine. Other plugins generate the cards; this one owns scheduling, deck limits, and review.",
+	"author": "michjadams",
+	"isDesktopOnly": false
+}

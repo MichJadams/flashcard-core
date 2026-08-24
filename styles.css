@@ -1,0 +1,207 @@
+/* flashcard-core — review surfaces (modal and ```flashcard block) */
+
+.fc-review-modal {
+	width: min(720px, 92vw);
+}
+
+.fc-review {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+	min-height: 320px;
+}
+
+.fc-review-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: var(--size-4-2);
+}
+
+.fc-review-progress {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.fc-review-card {
+	flex: 1;
+	overflow-y: auto;
+	max-height: 60vh;
+	padding: var(--size-4-2) 0;
+}
+
+.fc-side {
+	line-height: var(--line-height-normal);
+}
+
+.fc-front {
+	font-size: var(--font-ui-large);
+}
+
+.fc-extra {
+	margin-top: var(--size-4-3);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	border-left: 2px solid var(--background-modifier-border);
+	padding-left: var(--size-4-3);
+}
+
+.fc-divider {
+	margin: var(--size-4-3) 0;
+	border: none;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.fc-review-card img {
+	max-width: 100%;
+	height: auto;
+}
+
+.fc-review-card audio {
+	width: 100%;
+	margin-top: var(--size-4-2);
+}
+
+/* Controls */
+
+.fc-review-controls {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: var(--size-4-3);
+}
+
+.fc-flip {
+	width: 100%;
+	padding: var(--size-4-2);
+}
+
+.fc-grades {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: var(--size-4-2);
+}
+
+.fc-grade {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 2px;
+	padding: var(--size-4-2);
+	cursor: pointer;
+}
+
+.fc-grade-label {
+	font-weight: var(--font-medium);
+}
+
+.fc-grade-interval {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+/* Colour is a hint, never the only signal — the label always carries the meaning. */
+.fc-grade-again {
+	border-bottom: 2px solid var(--color-red);
+}
+
+.fc-grade-hard {
+	border-bottom: 2px solid var(--color-orange);
+}
+
+.fc-grade-good {
+	border-bottom: 2px solid var(--color-green);
+}
+
+.fc-grade-easy {
+	border-bottom: 2px solid var(--color-blue);
+}
+
+.fc-footer {
+	display: flex;
+	justify-content: flex-end;
+	align-items: center;
+	gap: var(--size-4-3);
+}
+
+.fc-replay,
+.fc-skip {
+	font-size: var(--font-ui-smaller);
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+/* Before the flip the replay button stands alone, so it needs its own alignment. */
+.fc-review-controls > .fc-replay {
+	align-self: flex-end;
+}
+
+.fc-done {
+	text-align: center;
+	padding: var(--size-4-8) 0;
+	color: var(--text-muted);
+}
+
+.fc-settings-summary p {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* The ```flashcard block */
+
+.fc-block {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3) var(--size-4-4);
+	background: var(--background-secondary);
+}
+
+/* Focus lives on the block itself while reviewing — it is what keeps the grade
+   keys alive — so the ring it would draw is noise. */
+.fc-block:focus,
+.fc-block:focus-visible {
+	outline: none;
+}
+
+/* A review inside a block has the page to breathe in, unlike the modal. */
+.fc-block .fc-review {
+	min-height: 0;
+}
+
+.fc-block .fc-review-card {
+	max-height: none;
+}
+
+.fc-block-empty {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	align-items: flex-start;
+}
+
+.fc-block-title {
+	font-weight: var(--font-medium);
+}
+
+.fc-block-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.fc-block-actions {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
+}
+
+.fc-block-change {
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
