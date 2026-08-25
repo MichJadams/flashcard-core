@@ -1194,6 +1194,109 @@ var import_obsidian6 = require("obsidian");
 // src/review-view.ts
 var import_obsidian5 = require("obsidian");
 
+// src/session.ts
+var MAX_SESSION_RETRIES = 4;
+var DEFAULT_SESSION_CONFIG = {
+  againGap: 3,
+  newBatchSize: 5
+};
+var SessionQueue = class {
+  constructor(queue, config = DEFAULT_SESSION_CONFIG) {
+    /** Cards admitted to the session. Index 0 is on screen. */
+    this.live = [];
+    /** New cards waiting for a batch slot, in queue order. */
+    this.held = [];
+    /** Distinct cards that have left the session, for progress. */
+    this.done = 0;
+    this.gap = Math.max(0, Math.floor(config.againGap) || 0);
+    this.batch = batchLimit(config.newBatchSize);
+    let admitted = 0;
+    for (const item of queue) {
+      if (item.reason !== "new") {
+        this.live.push({ item, retries: 0 });
+        continue;
+      }
+      if (admitted >= this.batch) {
+        this.held.push(item);
+        continue;
+      }
+      admitted += 1;
+      this.live.push({ item, retries: 0 });
+    }
+  }
+  /** The card on screen, or `null` when the session is finished. */
+  get current() {
+    var _a;
+    return (_a = this.live[0]) != null ? _a : null;
+  }
+  /** Cards still to be shown, counting the one on screen and the held batch. */
+  get remaining() {
+    return this.live.length + this.held.length;
+  }
+  /** Distinct cards in this session, shown or not. */
+  get size() {
+    return this.done + this.remaining;
+  }
+  /** New cards not yet admitted. Exposed for the progress line. */
+  get heldBack() {
+    return this.held.length;
+  }
+  /**
+   * Record a grade against the card on screen and move on.
+   *
+   * `updated` is the record the grade produced. Passing it keeps a returning
+   * card's state honest — its interval labels and `reps` count would
+   * otherwise be the ones it had before you missed it.
+   */
+  graded(rating, updated) {
+    const entry = this.live.shift();
+    if (!entry)
+      return;
+    if (updated)
+      entry.item = { ...entry.item, card: updated };
+    if (rating === Rating.Again && this.gap > 0 && entry.retries < MAX_SESSION_RETRIES) {
+      entry.retries += 1;
+      this.reinsert(entry);
+      return;
+    }
+    this.retire(entry);
+  }
+  /**
+   * Drop the card on screen without grading it.
+   *
+   * Covers both the skip key and a card whose note cannot be read. Neither
+   * has told us anything about recall, so the card leaves rather than
+   * returning — and it frees its batch slot, or a session of skips would sit
+   * there holding cards back for nothing.
+   */
+  drop() {
+    const entry = this.live.shift();
+    if (entry)
+      this.retire(entry);
+  }
+  /** Place a returning card, never on screen again immediately unless it is the last one. */
+  reinsert(entry) {
+    const distance = this.gap * 2 ** (entry.retries - 1);
+    const position = Math.min(Math.max(1, distance), this.live.length);
+    this.live.splice(position, 0, entry);
+  }
+  /** A card leaves the session; if it held a batch slot, the next new card takes it. */
+  retire(entry) {
+    this.done += 1;
+    if (entry.item.reason !== "new")
+      return;
+    const next = this.held.shift();
+    if (next)
+      this.live.push({ item: next, retries: 0 });
+  }
+};
+function batchLimit(size) {
+  if (!Number.isFinite(size))
+    return Number.POSITIVE_INFINITY;
+  const n = Math.floor(size);
+  return n > 0 ? n : Number.POSITIVE_INFINITY;
+}
+
 // src/hotkeys.ts
 var REVIEW_ACTIONS = [
   {
@@ -1310,7 +1413,6 @@ var ReviewView = class {
     this.containerEl = containerEl;
     this.deck = deck;
     this.host = host;
-    this.index = 0;
     this.flipped = false;
     this.grading = false;
     this.reviewed = 0;
@@ -1322,12 +1424,20 @@ var ReviewView = class {
     /** Bindings resolved once at mount, so a mid-session settings edit cannot desync them. */
     this.hotkeys = withDefaults(void 0);
     this.pending = null;
-    this.queue = queue;
+    this.session = this.newSession(queue);
     this.hotkeys = withDefaults(plugin.settings.hotkeys);
   }
   /** How many cards are still ahead, including the one on screen. */
   get remaining() {
-    return Math.max(0, this.queue.length - this.index);
+    return this.session.remaining;
+  }
+  /** Wrap a built queue in the session pacing the user has configured. */
+  newSession(queue) {
+    const { againGap, newBatchSize } = this.plugin.settings;
+    return new SessionQueue(queue, {
+      againGap: againGap != null ? againGap : DEFAULT_SESSION_CONFIG.againGap,
+      newBatchSize: newBatchSize != null ? newBatchSize : DEFAULT_SESSION_CONFIG.newBatchSize
+    });
   }
   mount() {
     const el = this.containerEl;
@@ -1392,19 +1502,19 @@ var ReviewView = class {
     this.renderHost.load();
   }
   get current() {
-    var _a;
-    return (_a = this.queue[this.index]) != null ? _a : null;
+    return this.session.current;
   }
   // -- rendering ----------------------------------------------------------
   async renderCurrent() {
     this.flipped = false;
-    const item = this.current;
-    if (!item) {
+    const entry = this.current;
+    if (!entry) {
       this.renderFinished();
       return;
     }
+    const item = entry.item;
     this.progressEl.setText(
-      `${this.index + 1} / ${this.queue.length} \xB7 ${item.card.deck} \xB7 ${labelFor(item)}`
+      `${this.session.remaining} left \xB7 ${item.card.deck} \xB7 ${labelFor(entry)}`
     );
     this.resetRenderHost();
     this.cardEl.empty();
@@ -1412,7 +1522,7 @@ var ReviewView = class {
     const content = await this.plugin.api.getCardContent(item.card.id);
     if (!content) {
       new import_obsidian5.Notice(`flashcard-core: could not read ${item.card.path}`);
-      this.index += 1;
+      this.session.drop();
       await this.renderCurrent();
       return;
     }
@@ -1442,9 +1552,10 @@ var ReviewView = class {
     if (this.flipped || !this.pending)
       return;
     this.flipped = true;
-    const item = this.current;
-    if (!item)
+    const entry = this.current;
+    if (!entry)
       return;
+    const item = entry.item;
     this.controlsEl.empty();
     this.cardEl.createEl("hr", { cls: "fc-divider" });
     const backEl = this.cardEl.createDiv({ cls: "fc-side fc-back" });
@@ -1495,7 +1606,7 @@ var ReviewView = class {
     const done = this.cardEl.createDiv({ cls: "fc-done" });
     done.createEl("h3", { text: "Queue complete" });
     done.createEl("p", {
-      text: `${this.reviewed} card${this.reviewed === 1 ? "" : "s"} graded, ${this.introduced} newly introduced.`
+      text: `${this.reviewed} grade${this.reviewed === 1 ? "" : "s"} recorded, ${this.introduced} card${this.introduced === 1 ? "" : "s"} newly introduced.`
     });
     const again = this.controlsEl.createEl("button", {
       cls: "mod-cta",
@@ -1528,8 +1639,7 @@ var ReviewView = class {
         new import_obsidian5.Notice("flashcard-core: nothing due right now.");
       return;
     }
-    this.queue = next;
-    this.index = 0;
+    this.session = this.newSession(next);
     await this.renderCurrent();
   }
   /**
@@ -1576,26 +1686,31 @@ var ReviewView = class {
   }
   // -- grading ------------------------------------------------------------
   async grade(rating) {
-    const item = this.current;
-    if (!item || this.grading)
+    const entry = this.current;
+    if (!entry || this.grading)
       return;
     this.grading = true;
+    let updated = null;
     try {
-      const result = await this.plugin.api.reviewCard(item.card.id, rating);
+      const result = await this.plugin.api.reviewCard(entry.item.card.id, rating);
+      updated = result.card;
       this.reviewed += 1;
       if (result.introduced)
         this.introduced += 1;
     } catch (err) {
       new import_obsidian5.Notice(`flashcard-core: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
       this.grading = false;
+      this.session.drop();
+      await this.renderCurrent();
+      return;
     }
-    this.index += 1;
+    this.grading = false;
+    this.session.graded(rating, updated);
     await this.renderCurrent();
   }
   /** Move past a card without grading it. Nothing is written, nothing counted. */
   async skip() {
-    this.index += 1;
+    this.session.drop();
     await this.renderCurrent();
   }
 };
@@ -1613,7 +1728,10 @@ function play(audio) {
   audio.currentTime = 0;
   void audio.play().catch(() => void 0);
 }
-function labelFor(item) {
+function labelFor(entry) {
+  const { item, retries } = entry;
+  if (retries > 0)
+    return `again \xD7${retries}`;
   if (item.reason === "new")
     return "new";
   if (item.reason === "learning")
@@ -4160,6 +4278,8 @@ var DEFAULT_SETTINGS = {
   root: "flashcards",
   autoplayAudio: true,
   showIntervals: true,
+  againGap: DEFAULT_SESSION_CONFIG.againGap,
+  newBatchSize: DEFAULT_SESSION_CONFIG.newBatchSize,
   hotkeys: { ...DEFAULT_HOTKEYS }
 };
 var FlashcardCoreSettingTab = class extends import_obsidian9.PluginSettingTab {
@@ -4192,6 +4312,28 @@ var FlashcardCoreSettingTab = class extends import_obsidian9.PluginSettingTab {
     new import_obsidian9.Setting(containerEl).setName("Show predicted intervals").setDesc("Label each grade button with when the card would next come up.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showIntervals).onChange(async (value) => {
         this.plugin.settings.showIntervals = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian9.Setting(containerEl).setName("Bring back cards graded Again").setDesc(
+      `How many cards to put between a card you got wrong and its return, doubling each time it comes back (up to ${MAX_SESSION_RETRIES} returns). Set to 0 to run straight through the queue instead.`
+    ).addText(
+      (text) => text.setPlaceholder(String(DEFAULT_SESSION_CONFIG.againGap)).setValue(String(this.plugin.settings.againGap)).onChange(async (value) => {
+        const parsed = parseCount(value);
+        if (parsed === null)
+          return;
+        this.plugin.settings.againGap = parsed;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian9.Setting(containerEl).setName("New cards per batch").setDesc(
+      "How many unseen cards to work on at once. A new card is only introduced once one already in the batch has been recalled \u2014 graded anything but Again. Set to 0 to introduce every new card the daily limit allows."
+    ).addText(
+      (text) => text.setPlaceholder(String(DEFAULT_SESSION_CONFIG.newBatchSize)).setValue(String(this.plugin.settings.newBatchSize)).onChange(async (value) => {
+        const parsed = parseCount(value);
+        if (parsed === null)
+          return;
+        this.plugin.settings.newBatchSize = parsed;
         await this.plugin.saveSettings();
       })
     );
@@ -4352,6 +4494,15 @@ var FlashcardCoreSettingTab = class extends import_obsidian9.PluginSettingTab {
     this.capturing = null;
   }
 };
+function parseCount(value) {
+  const trimmed = value.trim();
+  if (trimmed === "")
+    return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0)
+    return null;
+  return Math.floor(parsed);
+}
 function labelFor2(actionId) {
   var _a, _b;
   return (_b = (_a = REVIEW_ACTIONS.find((a) => a.id === actionId)) == null ? void 0 : _a.name) != null ? _b : actionId;

@@ -10,6 +10,7 @@
 import { Notice, PluginSettingTab, Setting, type App, type ButtonComponent } from "obsidian";
 
 import type { DailyRecord } from "./daily";
+import { DEFAULT_SESSION_CONFIG, MAX_SESSION_RETRIES } from "./session";
 import {
 	bindingFromEvent,
 	DEFAULT_HOTKEYS,
@@ -29,6 +30,10 @@ export interface FlashcardCoreSettings {
 	autoplayAudio: boolean;
 	/** Show predicted intervals on the grade buttons. */
 	showIntervals: boolean;
+	/** Cards between a card graded Again and its return, doubling per retry. 0 disables. */
+	againGap: number;
+	/** Unseen cards allowed in flight at once. 0 means no batching. */
+	newBatchSize: number;
 	/** Review-modal key bindings, keyed by action. Empty string means unbound. */
 	hotkeys: Record<ReviewActionId, string>;
 	/** Today's counters. Persisted here so they survive a restart. */
@@ -39,6 +44,8 @@ export const DEFAULT_SETTINGS: FlashcardCoreSettings = {
 	root: "flashcards",
 	autoplayAudio: true,
 	showIntervals: true,
+	againGap: DEFAULT_SESSION_CONFIG.againGap,
+	newBatchSize: DEFAULT_SESSION_CONFIG.newBatchSize,
 	hotkeys: { ...DEFAULT_HOTKEYS },
 };
 
@@ -90,6 +97,40 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 					this.plugin.settings.showIntervals = value;
 					await this.plugin.saveSettings();
 				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Bring back cards graded Again")
+			.setDesc(
+				`How many cards to put between a card you got wrong and its return, doubling each time it comes back (up to ${MAX_SESSION_RETRIES} returns). Set to 0 to run straight through the queue instead.`,
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder(String(DEFAULT_SESSION_CONFIG.againGap))
+					.setValue(String(this.plugin.settings.againGap))
+					.onChange(async (value) => {
+						const parsed = parseCount(value);
+						if (parsed === null) return;
+						this.plugin.settings.againGap = parsed;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("New cards per batch")
+			.setDesc(
+				"How many unseen cards to work on at once. A new card is only introduced once one already in the batch has been recalled — graded anything but Again. Set to 0 to introduce every new card the daily limit allows.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder(String(DEFAULT_SESSION_CONFIG.newBatchSize))
+					.setValue(String(this.plugin.settings.newBatchSize))
+					.onChange(async (value) => {
+						const parsed = parseCount(value);
+						if (parsed === null) return;
+						this.plugin.settings.newBatchSize = parsed;
+						await this.plugin.saveSettings();
+					}),
 			);
 
 		this.displayHotkeys(containerEl);
@@ -312,6 +353,15 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 		document.removeEventListener("keydown", this.capturing, true);
 		this.capturing = null;
 	}
+}
+
+/** A non-negative whole number, or `null` for anything we should not save. */
+function parseCount(value: string): number | null {
+	const trimmed = value.trim();
+	if (trimmed === "") return null;
+	const parsed = Number(trimmed);
+	if (!Number.isFinite(parsed) || parsed < 0) return null;
+	return Math.floor(parsed);
 }
 
 function labelFor(actionId: ReviewActionId): string {

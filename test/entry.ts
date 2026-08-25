@@ -1,5 +1,6 @@
 export { Scheduler, humanInterval } from "../src/scheduler";
 export { isEligible, blockedBy, Budget, QueueBuilder, resolveProviderOrder } from "../src/queue";
+export { SessionQueue, DEFAULT_SESSION_CONFIG, MAX_SESSION_RETRIES } from "../src/session";
 export { DeckConfigStore, DEFAULT_GLOBAL } from "../src/decks";
 export { DailyLedger, dayKey, emptyDaily } from "../src/daily";
 export { validateCard, validateSpec } from "../src/ingest";

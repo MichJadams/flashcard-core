@@ -21,6 +21,7 @@ implementation detail you never depend on.
 - [JSON ingestion schema](#json-ingestion-schema)
 - [Ingestion rules](#ingestion-rules)
 - [New-card ordering](#new-card-ordering)
+- [Session pacing](#session-pacing)
 - [Deck configuration](#deck-configuration)
 - [Programmatic API](#programmatic-api)
 - [Browsing with Bases](#browsing-with-bases)
@@ -329,6 +330,66 @@ Contract details:
 
 ---
 
+## Session pacing
+
+The three layers above decide **which** cards a session may contain. Pacing is
+the separate question of what order you actually meet them in, and it exists to
+fix one failure: fifteen unknown cards in a row, none of them recalled, the end
+of the queue reached without a single act of retrieval.
+
+Two rules, both in `src/session.ts`, both configurable under **Settings →
+Flashcard Core → Review**.
+
+### Cards graded Again come back
+
+A card you get wrong is put back into the session a few cards later instead of
+being dropped until the next queue build. The gap **doubles** each time the card
+comes back — 3, 6, 12, 24 with the default — so a card you keep missing is
+drilled tightly at first and then given room to be genuinely recalled rather
+than parroted.
+
+After four returns the card leaves anyway. Its FSRS state is already written, so
+a learning step brings it back through **Check for more**; and a card that has
+resisted five attempts in three minutes is telling you it needs rewriting, not
+another look.
+
+Set **Bring back cards graded Again** to `0` to disable this and run straight
+through the queue.
+
+The gap counts the cards *in between*: with a gap of 3 you see three other cards
+and then the one you missed.
+
+### New cards arrive in batches
+
+Only so many unseen cards are in flight at once — five by default. A held-back
+card is admitted when one already in the batch is graded anything **other than
+Again**, which is to say when you have recalled it once.
+
+This is the rule that actually fixes the complaint. A gap alone still lets
+fifteen unknown cards into the session; the batch means you are working on five
+until five are known.
+
+Set **New cards per batch** to `0` to introduce every new card the daily limit
+allows, as before.
+
+Due reviews are never held back — the batch counts unseen cards only, and a
+review leaving the session does not free a slot.
+
+### What pacing does not touch
+
+Nothing here grades, writes, or schedules. Every card carries out of the session
+exactly the FSRS state its grades produced, identical to what it would have been
+had the cards been shown in build order. Pacing is ordering and nothing else.
+
+Skipping a card drops it from the session rather than sending it back: a skip
+says nothing about recall. It does free its batch slot, or a session of skips
+would sit there holding cards back for no reason.
+
+The header reads `7 left · deck · again ×2` — what remains rather than a
+position, because a position out of a fixed total is a lie once cards return.
+
+---
+
 ## Deck configuration
 
 One file for the whole collection: `<root>/_decks.json`. Config does not live in
@@ -578,7 +639,7 @@ message on screen.
 | **3** | Grade: Good | Recalled correctly |
 | **4** | Grade: Easy | Recalled instantly |
 | **r** | Replay audio | Restarts the audio on the side showing |
-| **u** | Skip card | Moves on without recording anything |
+| **u** | Skip card | Drops the card from this session without recording anything |
 
 Grading lives exclusively on **1**–**4**. Space only ever moves you forward — it
 never writes a grade — so the key you lean on to get through a session cannot
@@ -635,7 +696,8 @@ regeneration preserves FSRS state.
 | `src/ingest.ts` | JSON validation and upsert orchestration. |
 | `src/decks.ts` | `_decks.json` and inheritance resolution. |
 | `src/daily.ts` | Introduction and review accounting. |
-| `src/queue.ts` | Eligibility, ordering, and budgets. |
+| `src/queue.ts` | Eligibility, ordering, and budgets — which cards a session may contain. |
+| `src/session.ts` | Session pacing — the order you meet them in. The only mutable view of a queue. |
 | `src/api.ts` | `FlashcardCoreAPI` implementation. |
 | `src/hotkeys.ts` | Review actions, default bindings, and binding parsing. |
 | `src/review-view.ts` | The review UI, free of any surface of its own. |

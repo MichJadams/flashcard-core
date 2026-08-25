@@ -9,8 +9,9 @@
 
 import { Component, MarkdownRenderer, Notice, type App } from "obsidian";
 
-import type { CardContent, QueueItem, RatingPreview } from "../types";
+import type { CardContent, CardRecord, QueueItem, RatingPreview } from "../types";
 import { Rating } from "../types";
+import { DEFAULT_SESSION_CONFIG, SessionQueue, type SessionEntry } from "./session";
 import {
 	parseHotkey,
 	REVIEW_ACTIONS,
@@ -52,8 +53,8 @@ const GRADES: GradeButton[] = [
 ];
 
 export class ReviewView {
-	private queue: QueueItem[];
-	private index = 0;
+	/** The live queue. Cards graded Again come back through it, so it is not the built order. */
+	private session: SessionQueue;
 	private flipped = false;
 	private grading = false;
 	private reviewed = 0;
@@ -83,13 +84,22 @@ export class ReviewView {
 		queue: QueueItem[],
 		private host: ReviewViewHost,
 	) {
-		this.queue = queue;
+		this.session = this.newSession(queue);
 		this.hotkeys = withDefaults(plugin.settings.hotkeys);
 	}
 
 	/** How many cards are still ahead, including the one on screen. */
 	get remaining(): number {
-		return Math.max(0, this.queue.length - this.index);
+		return this.session.remaining;
+	}
+
+	/** Wrap a built queue in the session pacing the user has configured. */
+	private newSession(queue: QueueItem[]): SessionQueue {
+		const { againGap, newBatchSize } = this.plugin.settings;
+		return new SessionQueue(queue, {
+			againGap: againGap ?? DEFAULT_SESSION_CONFIG.againGap,
+			newBatchSize: newBatchSize ?? DEFAULT_SESSION_CONFIG.newBatchSize,
+		});
 	}
 
 	mount(): void {
@@ -158,23 +168,26 @@ export class ReviewView {
 		this.renderHost.load();
 	}
 
-	private get current(): QueueItem | null {
-		return this.queue[this.index] ?? null;
+	private get current(): SessionEntry | null {
+		return this.session.current;
 	}
 
 	// -- rendering ----------------------------------------------------------
 
 	private async renderCurrent(): Promise<void> {
 		this.flipped = false;
-		const item = this.current;
+		const entry = this.current;
 
-		if (!item) {
+		if (!entry) {
 			this.renderFinished();
 			return;
 		}
+		const item = entry.item;
 
+		// Cards return after Again, so a position out of a fixed total would be
+		// a lie. What is left is the number that stays true either way.
 		this.progressEl.setText(
-			`${this.index + 1} / ${this.queue.length} · ${item.card.deck} · ${labelFor(item)}`,
+			`${this.session.remaining} left · ${item.card.deck} · ${labelFor(entry)}`,
 		);
 
 		this.resetRenderHost();
@@ -184,7 +197,7 @@ export class ReviewView {
 		const content = await this.plugin.api.getCardContent(item.card.id);
 		if (!content) {
 			new Notice(`flashcard-core: could not read ${item.card.path}`);
-			this.index += 1;
+			this.session.drop();
 			await this.renderCurrent();
 			return;
 		}
@@ -219,8 +232,9 @@ export class ReviewView {
 	private flip(): void {
 		if (this.flipped || !this.pending) return;
 		this.flipped = true;
-		const item = this.current;
-		if (!item) return;
+		const entry = this.current;
+		if (!entry) return;
+		const item = entry.item;
 
 		this.controlsEl.empty();
 		this.cardEl.createEl("hr", { cls: "fc-divider" });
@@ -279,8 +293,10 @@ export class ReviewView {
 
 		const done = this.cardEl.createDiv({ cls: "fc-done" });
 		done.createEl("h3", { text: "Queue complete" });
+		// Grades, not cards: a card sent back after Again is graded more than
+		// once, so counting cards here would undercount the work done.
 		done.createEl("p", {
-			text: `${this.reviewed} card${this.reviewed === 1 ? "" : "s"} graded, ${this.introduced} newly introduced.`,
+			text: `${this.reviewed} grade${this.reviewed === 1 ? "" : "s"} recorded, ${this.introduced} card${this.introduced === 1 ? "" : "s"} newly introduced.`,
 		});
 
 		const again = this.controlsEl.createEl("button", {
@@ -310,8 +326,7 @@ export class ReviewView {
 			else new Notice("flashcard-core: nothing due right now.");
 			return;
 		}
-		this.queue = next;
-		this.index = 0;
+		this.session = this.newSession(next);
 		await this.renderCurrent();
 	}
 
@@ -362,25 +377,33 @@ export class ReviewView {
 	// -- grading ------------------------------------------------------------
 
 	private async grade(rating: Rating): Promise<void> {
-		const item = this.current;
-		if (!item || this.grading) return;
+		const entry = this.current;
+		if (!entry || this.grading) return;
 		this.grading = true;
+		let updated: CardRecord | null = null;
 		try {
-			const result = await this.plugin.api.reviewCard(item.card.id, rating);
+			const result = await this.plugin.api.reviewCard(entry.item.card.id, rating);
+			updated = result.card;
 			this.reviewed += 1;
 			if (result.introduced) this.introduced += 1;
 		} catch (err) {
 			new Notice(`flashcard-core: ${err instanceof Error ? err.message : String(err)}`);
-		} finally {
+			// The grade never landed, so nothing was learned about this card and
+			// sending it back would be pacing on a fiction. Move on; the queue is
+			// rebuildable, the write is what matters.
 			this.grading = false;
+			this.session.drop();
+			await this.renderCurrent();
+			return;
 		}
-		this.index += 1;
+		this.grading = false;
+		this.session.graded(rating, updated);
 		await this.renderCurrent();
 	}
 
 	/** Move past a card without grading it. Nothing is written, nothing counted. */
 	private async skip(): Promise<void> {
-		this.index += 1;
+		this.session.drop();
 		await this.renderCurrent();
 	}
 }
@@ -405,7 +428,14 @@ function play(audio: HTMLAudioElement | null): void {
 	void audio.play().catch(() => undefined);
 }
 
-function labelFor(item: QueueItem): string {
+/**
+ * The line under the deck name. The retry count is the point of it: seeing
+ * "again ×2" is what tells you this card is being drilled rather than that the
+ * queue has stalled.
+ */
+function labelFor(entry: SessionEntry): string {
+	const { item, retries } = entry;
+	if (retries > 0) return `again ×${retries}`;
 	if (item.reason === "new") return "new";
 	if (item.reason === "learning") return "learning";
 	return `review · ${item.card.fsrs.reps} reps`;
