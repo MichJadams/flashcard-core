@@ -147,7 +147,17 @@ export interface CardSpec {
 	 * card with a fresh history.
 	 */
 	id: string;
-	/** Slash-delimited hierarchical deck path, e.g. `piano/note-reading`. */
+	/**
+	 * Id of the deck this card belongs to, e.g. `deck-a1b2c3d`.
+	 *
+	 * An id is opaque and carries no meaning: it implies no hierarchy, no
+	 * inherited settings, and no folder. The deck's name, limits, and location
+	 * all live in the `flashcard-core-deck.md` note declaring this id.
+	 *
+	 * Generators should not hard-code one. Call
+	 * {@link FlashcardCoreAPI.resolveDeckRef} with the deck's display name, so
+	 * the id stays an implementation detail.
+	 */
 	deck: string;
 	/** Rendering hint. Defaults to `"basic"`. */
 	template?: CardTemplate;
@@ -327,41 +337,68 @@ export interface DeckFsrsParams {
 	w?: number[];
 }
 
+/** Frontmatter marker identifying a deck note. */
+export const DECK_MARKER = "deck";
+
+/** File name that makes a folder a deck. */
+export const DECK_FILE = "flashcard-core-deck.md";
+
 /**
- * Configuration for one deck. Every field is optional: an unset field falls
- * back to the parent deck, and ultimately to the global defaults.
+ * Configuration for one deck, as written in a deck note's frontmatter.
+ *
+ * Every field is optional and an unset field falls back to the global
+ * defaults. Decks are flat — there is no inheritance between them, so a deck
+ * id that looks like a path (`language/masari/video_word_vocab`) is just a
+ * name with slashes in it.
  */
 export interface DeckConfig {
+	/** Human-facing title. Falls back to the id when unset. */
+	name?: string;
 	/** Maximum cards introduced per day in this deck. */
 	new_per_day?: number;
 	/** Maximum non-new cards shown per day in this deck. */
 	max_reviews_per_day?: number;
 	/** When `false`, the deck is skipped by queue building entirely. */
 	enabled?: boolean;
-	/** Scheduler tuning for this deck. Merged field-by-field with the parent. */
+	/** Scheduler tuning for this deck. Merged field-by-field with the defaults. */
 	fsrs_params?: DeckFsrsParams;
-	/**
-	 * Explicit parent to inherit from, overriding the implicit path parent.
-	 *
-	 * By default `piano/note-reading` inherits from `piano`; set `inherits` to
-	 * borrow limits from an unrelated deck instead.
-	 */
-	inherits?: string;
 }
 
-/** A deck config with every field filled in by inheritance. */
+/**
+ * A discovered deck note: its config, plus where it was found.
+ *
+ * The id is what ties cards to the deck — a card's `deck` field holds an id,
+ * never a folder path. Keeping the two separate means a deck folder can be
+ * reorganised without rewriting a single card.
+ */
+export interface DeckNote extends DeckConfig {
+	/** Stable deck id, matched against each card's `deck` field. */
+	id: string;
+	/** Vault path of the deck note itself. */
+	path: string;
+	/** Folder containing the deck note, i.e. the deck's own folder. */
+	folder: string;
+}
+
+/** A deck config with every field filled in from the defaults. */
 export interface ResolvedDeckConfig {
-	/** The deck this was resolved for. */
+	/** The deck id this was resolved for. */
 	deck: string;
+	/** Display title: the deck note's `name`, or the id when it has none. */
+	name: string;
 	new_per_day: number;
 	max_reviews_per_day: number;
 	enabled: boolean;
 	fsrs_params: DeckFsrsParams & { request_retention: number };
-	/** Decks consulted during resolution, nearest first. Useful for debugging. */
-	chain: string[];
+	/** Deck note backing this config, or `null` for an unregistered deck. */
+	path: string | null;
+	/** The deck's folder, or `null` for an unregistered deck. */
+	folder: string | null;
+	/** `false` when no deck note exists and the defaults are standing in. */
+	registered: boolean;
 }
 
-/** Global settings, stored alongside per-deck config in `_decks.json`. */
+/** Collection-wide settings, stored in the plugin's own `data.json`. */
 export interface GlobalDeckSettings {
 	/**
 	 * Cap on cards introduced per day across *all* decks combined.
@@ -375,16 +412,8 @@ export interface GlobalDeckSettings {
 	 * Default `4`, matching Anki's convention.
 	 */
 	day_start_hour: number;
-	/** Defaults for decks with no config of their own. */
-	defaults: Required<Omit<DeckConfig, "inherits">>;
-}
-
-/** On-disk shape of `flashcards/_decks.json`. */
-export interface DeckConfigFile {
-	version: 1;
-	global: GlobalDeckSettings;
-	/** Keyed by deck path. */
-	decks: Record<string, DeckConfig>;
+	/** Defaults for decks that leave a field unset, or have no deck note at all. */
+	defaults: Required<Omit<DeckConfig, "name">>;
 }
 
 /** Counters for one deck on the current review day. */
@@ -398,7 +427,7 @@ export interface DeckDailyStats {
 	new_remaining: number;
 	/** `max_reviews_per_day` minus reviews, floored at 0 and capped globally. */
 	reviews_remaining: number;
-	/** Cards in the deck subtree, by state. */
+	/** Cards in the deck, by state. */
 	counts: Record<CardState, number>;
 	/** Cards currently due, ignoring limits. */
 	due_now: number;
@@ -524,10 +553,22 @@ export interface FlashcardCoreAPI {
 	/** Read a card's rendered Markdown sections. */
 	getCardContent(id: string): Promise<CardContent | null>;
 
-	/** Deck names known to the core, sorted, including intermediate parents. */
+	/** Deck ids known to the core, sorted. Registered decks and card decks alike. */
 	listDecks(): string[];
 
-	/** Today's counters and card counts for a deck subtree. */
+	/** Every discovered deck note, sorted by id. */
+	listDeckNotes(): DeckNote[];
+
+	/**
+	 * Turn a deck reference into a deck id.
+	 *
+	 * Accepts an id or a deck note's `name`, so a generator can target a deck
+	 * by its readable title instead of hard-coding an opaque id. An unmatched
+	 * reference comes back unchanged.
+	 */
+	resolveDeckRef(ref: string): string;
+
+	/** Today's counters and card counts for one deck. */
 	getDeckStats(deck: string): DeckDailyStats;
 
 	// -- reviewing ----------------------------------------------------------
@@ -546,14 +587,25 @@ export interface FlashcardCoreAPI {
 
 	// -- configuration ------------------------------------------------------
 
-	/** Fully resolved config for a deck, following the inheritance chain. */
+	/** Config for a deck, with unset fields filled in from the global defaults. */
 	getDeckConfig(deck: string): ResolvedDeckConfig;
 
-	/** Raw, unresolved config as stored for exactly this deck. */
-	getRawDeckConfig(deck: string): DeckConfig | null;
+	/** The deck note as written, or `null` when the deck has none. */
+	getRawDeckConfig(deck: string): DeckNote | null;
 
-	/** Merge `partial` into a deck's stored config and persist it. */
+	/**
+	 * Merge `partial` into a deck's note frontmatter and persist it.
+	 *
+	 * Throws when the deck has no note — call {@link createDeckNote} first, so
+	 * that config can never be written to a deck that does not exist.
+	 */
 	setDeckConfig(deck: string, partial: DeckConfig): Promise<ResolvedDeckConfig>;
+
+	/**
+	 * Create `<folder>/flashcard-core-deck.md`, registering the folder as a
+	 * deck. Resolves to the existing note if one is already there.
+	 */
+	createDeckNote(folder: string, deck: string, config?: DeckConfig): Promise<DeckNote>;
 
 	/** Read global caps and defaults. */
 	getGlobalSettings(): GlobalDeckSettings;

@@ -151,6 +151,87 @@
 	font-size: var(--font-ui-small);
 }
 
+/* Deck rows in settings: the id carries the information, so it gets the
+   monospace treatment while the pretty name stays the heading. */
+.fc-deck-row .setting-item-description {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+/* The deck-note blocks */
+
+.fc-deck-panel {
+	margin: var(--size-4-2) 0;
+}
+
+.fc-deck-head {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-4-2);
+	flex-wrap: wrap;
+	margin-bottom: var(--size-4-3);
+}
+
+.fc-deck-title {
+	font-size: var(--font-ui-large);
+	font-weight: var(--font-semibold);
+}
+
+.fc-deck-id {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.fc-deck-off {
+	color: var(--text-on-accent);
+	background: var(--text-warning);
+	border-radius: var(--radius-s);
+	padding: 0 var(--size-2-2);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Auto-fit rather than a fixed count: these blocks get rendered in a note, a
+   sidebar, and a narrow phone pane. */
+.fc-deck-tiles {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(5.5em, 1fr));
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-3);
+}
+
+.fc-deck-tile {
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-2);
+	text-align: center;
+}
+
+.fc-deck-tile-value {
+	font-size: var(--font-ui-large);
+	font-weight: var(--font-semibold);
+	font-variant-numeric: tabular-nums;
+}
+
+.fc-deck-tile-label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.fc-deck-today {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.fc-deck-note {
+	color: var(--text-warning);
+	margin-top: var(--size-2-2);
+}
+
+.fc-deck-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
 /* The ```flashcard block */
 
 .fc-block {

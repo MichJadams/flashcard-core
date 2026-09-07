@@ -4,20 +4,20 @@
  * The core owns this, not the generators. A generator proposes an order; only
  * this module decides what has been spent against a limit today.
  *
- * Counters roll up the deck hierarchy: introducing a card in
- * `piano/note-reading` also spends budget in `piano`, so a parent deck's limit
- * genuinely caps its subtree.
+ * Decks are flat, so a counter belongs to exactly one deck. The two `*_total`
+ * fields exist because the global caps are their own budget, not a sum anyone
+ * has to recompute.
  */
 
-import { deckAncestry, normaliseDeck } from "./note";
+import { normaliseDeck } from "./note";
 
 /** Persisted counters for a single review day. */
 export interface DailyRecord {
 	/** Review day key, `YYYY-MM-DD`, adjusted for `day_start_hour`. */
 	day: string;
-	/** Cards introduced today, keyed by deck and by each of its ancestors. */
+	/** Cards introduced today, keyed by deck id. */
 	introduced: Record<string, number>;
-	/** Non-new grades submitted today, keyed the same way. */
+	/** Non-new grades submitted today, keyed by deck id. */
 	reviews: Record<string, number>;
 	/** Introductions across every deck, for the global cap. */
 	introduced_total: number;
@@ -75,12 +75,12 @@ export class DailyLedger {
 		if (this.record.day !== key) this.record = emptyDaily(key);
 	}
 
-	/** Cards introduced today in this deck's subtree. */
+	/** Cards introduced today in this deck. */
 	introduced(deck: string, now: Date = new Date()): number {
 		return this.current(now).introduced[normaliseDeck(deck)] ?? 0;
 	}
 
-	/** Non-new grades submitted today in this deck's subtree. */
+	/** Non-new grades submitted today in this deck. */
 	reviews(deck: string, now: Date = new Date()): number {
 		return this.current(now).reviews[normaliseDeck(deck)] ?? 0;
 	}
@@ -95,22 +95,20 @@ export class DailyLedger {
 		return this.current(now).reviews_total;
 	}
 
-	/** Record an introduction against a deck and every ancestor of it. */
+	/** Record an introduction against a deck. */
 	async recordIntroduction(deck: string, now: Date = new Date()): Promise<void> {
 		const record = this.current(now);
-		for (const step of deckAncestry(deck)) {
-			record.introduced[step] = (record.introduced[step] ?? 0) + 1;
-		}
+		const key = normaliseDeck(deck);
+		record.introduced[key] = (record.introduced[key] ?? 0) + 1;
 		record.introduced_total += 1;
 		await this.persist(record);
 	}
 
-	/** Record a non-new grade against a deck and every ancestor of it. */
+	/** Record a non-new grade against a deck. */
 	async recordReview(deck: string, now: Date = new Date()): Promise<void> {
 		const record = this.current(now);
-		for (const step of deckAncestry(deck)) {
-			record.reviews[step] = (record.reviews[step] ?? 0) + 1;
-		}
+		const key = normaliseDeck(deck);
+		record.reviews[key] = (record.reviews[key] ?? 0) + 1;
 		record.reviews_total += 1;
 		await this.persist(record);
 	}

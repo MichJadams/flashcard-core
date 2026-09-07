@@ -49,13 +49,13 @@ Four decisions drive everything else:
    reviewer.
 
 ```
-flashcards/                       <- configurable root
-├── _decks.json                   <- deck limits and FSRS tuning
-├── Flashcards.base               <- optional; created on demand
+flashcards/                          <- configurable root for new cards
+├── Flashcards.base                  <- optional; created on demand
 └── piano/
     └── note-reading/
+        ├── flashcard-core-deck.md   <- makes this folder a deck
         ├── blossom__note-reading__c5-treble.md
-        ├── treble-c5.png         <- media beside the card
+        ├── treble-c5.png            <- media beside the card
         └── c5.mp3
 ```
 
@@ -235,7 +235,7 @@ the new deck folder on the next ingestion.
 
 ```ts
 await core.deleteCards(["blossom:note-reading:c5-treble"]);   // by id
-await core.deleteByDeck("piano/note-reading", "blossom");     // deck subtree, your cards only
+await core.deleteByDeck("piano/note-reading", "blossom");     // one deck, your cards only
 await core.upsertCards({ ...spec, options: { prune_decks: ["piano/note-reading"] } });
 ```
 
@@ -277,12 +277,11 @@ later insert `1500` without renumbering the deck.
 Take cards while budget remains. Budget is the minimum of:
 
 - the deck's remaining `new_per_day`,
-- every ancestor deck's remaining `new_per_day`,
 - the global `new_per_day_cap`.
 
-Introducing a card in `piano/note-reading` spends budget in
-`piano/note-reading`, in `piano`, and globally — so a parent's limit genuinely
-caps its subtree instead of merely describing it.
+Decks are flat. Introducing a card spends budget in exactly one deck and in the
+collection-wide pool, so one deck can never quietly consume another's
+allowance.
 
 ### Who counts what
 
@@ -392,69 +391,100 @@ position, because a position out of a fixed total is a lie once cards return.
 
 ## Deck configuration
 
-One file for the whole collection: `<root>/_decks.json`. Config does not live in
-card frontmatter, because decks are configured far less often than cards are
-generated and a deck's limits should not be at the mercy of the next
-regeneration.
+**A deck is a folder holding a `flashcard-core-deck.md` note.** That note's
+frontmatter is the deck's config, which means it is editable in Obsidian
+itself, next to the cards it governs, and it travels with the collection.
 
-```json
-{
-  "version": 1,
-  "global": {
-    "new_per_day_cap": 40,
-    "reviews_per_day_cap": null,
-    "day_start_hour": 4,
-    "defaults": {
-      "new_per_day": 20,
-      "max_reviews_per_day": 200,
-      "enabled": true,
-      "fsrs_params": { "request_retention": 0.9 }
-    }
-  },
-  "decks": {
-    "piano": {
-      "new_per_day": 10,
-      "fsrs_params": { "request_retention": 0.85, "learning_steps": ["1m", "10m"] }
-    },
-    "piano/note-reading": { "new_per_day": 4 },
-    "piano/rhythm": { "enabled": false },
-    "language/masri": { "inherits": "language/shared-limits" }
-  }
-}
+```yaml
+---
+fc: deck
+id: deck-a1b2c3d
+name: Note reading (treble)
+new_per_day: 4
+max_reviews_per_day: 200
+enabled: true
+fsrs_params:
+  request_retention: 0.85
+  learning_steps: ["1m", "10m"]
+---
+
+```flashcard-deck-stats
 ```
+
+```flashcard-deck-settings
+```
+```
+
+### Ids, names, and folders
+
+Three separate things, deliberately:
+
+- **`id`** is what ties cards to the deck. A card's `deck` field holds an id,
+  never a folder path, so a deck folder can be renamed or moved without
+  rewriting a single card.
+- **`name`** is for display, and is the only part meant to be read or typed.
+  It falls back to the id when unset.
+- **the folder** is just where the note lives, and where new cards for the deck
+  get written. `createDeckNote` and the settings tab put it beside the cards.
+
+**Ids are opaque by convention: `deck-` plus seven lowercase alphanumerics**,
+e.g. `deck-a1b2c3d`. Any string works — an id is never parsed — but an opaque
+one keeps a rename from ever becoming a migration. Nothing is inherited between
+decks whatever the id looks like.
+
+Because an opaque id is no fun to type, everywhere a *person* names a deck
+accepts either form: a `deck:` line in a code block takes the id or the display
+name, and `resolveDeckRef(ref)` does the same for generators. Matching is
+id-first, then name, case-insensitively.
+
+A generator should call `resolveDeckRef("MSA vocabulary")` rather than
+hard-coding `deck-a1b2c3d`, so the id stays an implementation detail.
 
 ### Per-deck fields
 
 | Field | Meaning |
 | --- | --- |
-| `new_per_day` | Cards introduced per day in this subtree. |
-| `max_reviews_per_day` | Non-new cards shown per day in this subtree. |
+| `id` | **Required.** Stable deck id, matched against each card's `deck`. |
+| `name` | Display title. Defaults to the id. |
+| `new_per_day` | Cards introduced per day in this deck. |
+| `max_reviews_per_day` | Non-new cards shown per day in this deck. |
 | `enabled` | `false` removes the deck from queue building entirely. |
 | `fsrs_params` | `request_retention`, `maximum_interval`, `enable_fuzz`, `enable_short_term`, `learning_steps`, `relearning_steps`, `w`. |
-| `inherits` | Explicit parent, overriding the implicit path parent. |
 
-Every field is optional. Steps are `"1m"` / `"2h"` / `"1d"` strings.
+Every field but `id` is optional; an unset field falls back to the global
+defaults in plugin settings, and nowhere else. `fsrs_params` merges
+field-by-field with the defaults. Steps are `"1m"` / `"2h"` / `"1d"` strings.
 
-### Inheritance
+A malformed field is treated as absent rather than fatal, so one typo costs a
+deck one setting instead of all of them.
 
-The chain runs from the deck itself, through each ancestor — or through
-`inherits` when it is set — and finally to `global.defaults`. The nearest entry
-that defines a field wins. `fsrs_params` merges field-by-field, so a child can
-override `request_retention` without restating the learning steps.
+### Decks without a note
 
-With the config above, `piano/note-reading/treble`:
+A deck id that appears on cards but has no deck note still works: it resolves
+to the global defaults and reports `registered: false`. Nothing silently drops
+out of the review queue. The settings tab lists such decks with a button to
+create the missing note.
 
-| Field | Value | From |
-| --- | --- | --- |
-| `new_per_day` | `4` | `piano/note-reading` |
-| `max_reviews_per_day` | `200` | `global.defaults` |
-| `request_retention` | `0.85` | `piano` |
-| `learning_steps` | `["1m", "10m"]` | `piano` |
+### The blocks
 
-`resolve()` returns the `chain` it walked, so misconfigurations are debuggable.
-Cycles in `inherits` are cut off rather than thrown.
+Two code blocks make a deck note a control panel. Both default to the deck of
+the note they sit in, so an empty block is the normal case; a `deck:` line
+inside the block overrides that — by id or by name — which is how a dashboard
+note shows a deck it does not live in.
+
+| Block | Shows |
+| --- | --- |
+| `flashcard-deck-stats` | Card counts by state, what is due, and today's progress against the limits. |
+| `flashcard-deck-settings` | Name, both daily limits, enabled, and target retention — written straight to frontmatter. |
+
+Text fields commit on blur and on Enter rather than per keystroke, since every
+commit rewrites the note.
 
 ### Global caps
+
+Global caps and the per-deck defaults live in the plugin's own `data.json`,
+not in the vault — they are nobody's deck's business, and a config file under
+the card folder goes missing the moment that folder is renamed.
 
 `new_per_day_cap` and `reviews_per_day_cap` apply across every deck combined;
 `null` disables them. `day_start_hour` (default `4`) is when the review day
@@ -492,11 +522,13 @@ into your own source tree.
 | Method | Returns |
 | --- | --- |
 | `getCard(id)` | `CardRecord \| null` |
-| `getCards(deck?)` | `CardRecord[]` — deck subtree, or everything |
+| `getCards(deck?)` | `CardRecord[]` — one deck, or everything |
 | `getDueCards(deck?, limit?)` | `CardRecord[]` — non-new, due now, most overdue first. Respects `max_reviews_per_day` unless `limit` is given. |
 | `buildQueue(options?)` | `Promise<QueueItem[]>` — learning, then reviews, then new |
 | `getCardContent(id)` | `Promise<CardContent \| null>` — `{ front, back, extra }` |
-| `listDecks()` | `string[]`, including intermediate parents |
+| `listDecks()` | `string[]` — every deck with cards or a deck note |
+| `listDeckNotes()` | `DeckNote[]` — registered decks only |
+| `resolveDeckRef(ref)` | `string` — deck id, from an id or a display name |
 | `getDeckStats(deck)` | `DeckDailyStats` — today's counters, per-state counts, due count |
 
 `buildQueue` options: `{ deck?, limit?, no_new?, ignore_limits? }`.
@@ -518,12 +550,15 @@ into your own source tree.
 
 | Method | Returns |
 | --- | --- |
-| `getDeckConfig(deck)` | `ResolvedDeckConfig` — fully inherited, with the `chain` |
-| `getRawDeckConfig(deck)` | `DeckConfig \| null` — exactly what is stored |
-| `setDeckConfig(deck, partial)` | `Promise<ResolvedDeckConfig>` — merges and persists |
+| `getDeckConfig(deck)` | `ResolvedDeckConfig` — defaults filled in, plus `registered` |
+| `getRawDeckConfig(deck)` | `DeckNote \| null` — the note as written |
+| `setDeckConfig(deck, partial)` | `Promise<ResolvedDeckConfig>` — merges into frontmatter |
+| `createDeckNote(folder, id, config?)` | `Promise<DeckNote>` — registers a folder as a deck |
 | `getGlobalSettings()` / `setGlobalSettings(partial)` | `GlobalDeckSettings` |
 
-Passing `undefined` for a field in `setDeckConfig` clears it back to inherited.
+Passing `undefined` for a field in `setDeckConfig` clears it back to the
+global default. `setDeckConfig` throws for a deck with no note; call
+`createDeckNote(folder, id)` first.
 
 ### Ordering and UI
 
@@ -582,14 +617,18 @@ A ```` ```flashcard ```` block puts one deck's queue in the page:
 
 ````markdown
 ```flashcard
-deck: language/arabic
+deck: MSA vocabulary
 ```
 ````
 
+The value is an id or a display name, so blocks stay readable even though ids
+are opaque.
+
 A block with no `deck:` renders a **Choose deck…** button; picking a deck writes
-`deck: <name>` into the block, so the choice lives in the note and survives
-everything. A bare deck name on its own line is read the same way — a deck name
-can never contain a colon, which is the whole difference between the two shapes.
+`deck: <id>` into the block, so the choice lives in the note and survives
+everything. A bare deck reference on its own line is read the same way — a deck
+name can never contain a colon, which is the whole difference between the two
+shapes.
 
 The block then has exactly two states:
 
@@ -680,7 +719,7 @@ npm run verify    # logic tests, no Obsidian required
 ```
 
 `npm run verify` bundles the pure modules with a stubbed `obsidian` and a fake
-in-memory vault, then exercises scheduling, deck inheritance, daily budgets,
+in-memory vault, then exercises scheduling, deck notes, daily budgets,
 prerequisite gating, provider precedence, and — most importantly — that
 regeneration preserves FSRS state.
 
@@ -694,7 +733,8 @@ regeneration preserves FSRS state.
 | `src/note.ts` | Card-note format: frontmatter, sections, media embeds, paths. |
 | `src/store.ts` | The card index and all vault I/O. |
 | `src/ingest.ts` | JSON validation and upsert orchestration. |
-| `src/decks.ts` | `_decks.json` and inheritance resolution. |
+| `src/deck-notes.ts` | Deck-note discovery and config resolution. |
+| `src/deck-block.ts` | The two deck-note code blocks. |
 | `src/daily.ts` | Introduction and review accounting. |
 | `src/queue.ts` | Eligibility, ordering, and budgets — which cards a session may contain. |
 | `src/session.ts` | Session pacing — the order you meet them in. The only mutable view of a queue. |

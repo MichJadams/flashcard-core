@@ -1,15 +1,17 @@
 /**
  * Plugin-level settings and the settings tab.
  *
- * Note the split: *plugin* settings (where cards live, UI preferences) are here
- * in `data.json`; *deck* settings (limits, FSRS tuning) live in the vault's
- * `_decks.json` so they travel with the collection and can be edited by hand or
- * by a generator.
+ * Note the split: *plugin* settings (where cards live, UI preferences) and the
+ * collection-wide deck defaults are here in `data.json`; a *deck's own*
+ * settings live in its `flashcard-core-deck.md` note, so they travel with the
+ * collection and are editable in Obsidian itself.
  */
 
 import { Notice, PluginSettingTab, Setting, type App, type ButtonComponent } from "obsidian";
 
+import type { GlobalDeckSettings } from "../types";
 import type { DailyRecord } from "./daily";
+import { DEFAULT_GLOBAL, folderForCards } from "./deck-notes";
 import { DEFAULT_SESSION_CONFIG, MAX_SESSION_RETRIES } from "./session";
 import {
 	bindingFromEvent,
@@ -24,7 +26,7 @@ import {
 import type FlashcardCorePlugin from "../main";
 
 export interface FlashcardCoreSettings {
-	/** Folder that holds deck folders, card notes, media, and `_decks.json`. */
+	/** Folder new card notes and their media are written into. */
 	root: string;
 	/** Play the first audio embed automatically when a side is shown. */
 	autoplayAudio: boolean;
@@ -36,6 +38,14 @@ export interface FlashcardCoreSettings {
 	newBatchSize: number;
 	/** Review-modal key bindings, keyed by action. Empty string means unbound. */
 	hotkeys: Record<ReviewActionId, string>;
+	/**
+	 * Collection-wide deck caps and defaults.
+	 *
+	 * These live here rather than in the vault because they are not any one
+	 * deck's business, and because a config file under the card folder goes
+	 * missing the moment that folder is renamed.
+	 */
+	deckGlobals: GlobalDeckSettings;
 	/** Today's counters. Persisted here so they survive a restart. */
 	daily?: DailyRecord;
 }
@@ -47,6 +57,7 @@ export const DEFAULT_SETTINGS: FlashcardCoreSettings = {
 	againGap: DEFAULT_SESSION_CONFIG.againGap,
 	newBatchSize: DEFAULT_SESSION_CONFIG.newBatchSize,
 	hotkeys: { ...DEFAULT_HOTKEYS },
+	deckGlobals: structuredClone(DEFAULT_GLOBAL),
 };
 
 export class FlashcardCoreSettingTab extends PluginSettingTab {
@@ -139,18 +150,13 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 
 		const global = this.plugin.decks.global();
 
-		new Setting(containerEl)
-			.setName("Deck configuration file")
-			.setDesc(
-				`Per-deck limits and FSRS parameters live in ${this.plugin.decks.filePath}. Edit it directly, or call setDeckConfig from a generator plugin.`,
-			)
-			.addButton((button) =>
-				button.setButtonText("Reload").onClick(async () => {
-					await this.plugin.decks.load();
-					this.plugin.scheduler.invalidate();
-					this.display();
-				}),
-			);
+		containerEl.createEl("p", {
+			cls: "fc-settings-summary",
+			text:
+				"A deck is a folder holding a flashcard-core-deck.md note, and that note's " +
+				"frontmatter holds the deck's limits. Open a deck below to change them; the " +
+				"values here apply to any field a deck note leaves unset.",
+		});
 
 		new Setting(containerEl)
 			.setName("Global new-card cap")
@@ -194,7 +200,7 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Default new cards per day")
-			.setDesc("Used by any deck that does not set its own limit and has no configured parent.")
+			.setDesc("Used by any deck whose note leaves new_per_day unset.")
 			.addText((text) =>
 				text.setValue(String(global.defaults.new_per_day)).onChange(async (value) => {
 					const parsed = Number(value);
@@ -207,7 +213,7 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Default reviews per day")
-			.setDesc("Used by any deck that does not set its own limit and has no configured parent.")
+			.setDesc("Used by any deck whose note leaves max_reviews_per_day unset.")
 			.addText((text) =>
 				text.setValue(String(global.defaults.max_reviews_per_day)).onChange(async (value) => {
 					const parsed = Number(value);
@@ -217,6 +223,8 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 					});
 				}),
 			);
+
+		this.displayDeckList(containerEl);
 
 		new Setting(containerEl).setName("Today").setHeading();
 
@@ -238,6 +246,82 @@ export class FlashcardCoreSettingTab extends PluginSettingTab {
 						this.display();
 					}),
 			);
+	}
+
+	// -- deck list ----------------------------------------------------------
+
+	/**
+	 * One row per deck, linking to the note that configures it.
+	 *
+	 * Limits are deliberately *not* editable here. A deck's knobs belong in its
+	 * own note next to its cards, and duplicating them in two places is how
+	 * they end up disagreeing. What this list is for is finding a deck, and
+	 * spotting a deck that has cards but no note to configure them with.
+	 */
+	private displayDeckList(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName("Your decks").setHeading();
+
+		const decks = this.plugin.api.listDecks();
+		if (decks.length === 0) {
+			containerEl.createEl("p", {
+				cls: "fc-settings-summary",
+				text: "No decks yet. One appears here as soon as a card or a deck note exists.",
+			});
+			return;
+		}
+
+		for (const deck of decks) {
+			const config = this.plugin.decks.resolve(deck);
+			const cards = this.plugin.store.inDeck(deck).length;
+			const setting = new Setting(containerEl).setClass("fc-deck-row");
+
+			setting.setName(config.registered ? config.name : deck);
+			setting.setDesc(
+				config.registered
+					? `${deck} · ${cards} cards · ${config.new_per_day} new/day, ${config.max_reviews_per_day} reviews/day` +
+							(config.enabled ? "" : " · disabled")
+					: `${deck} · ${cards} cards · ⚠ no deck note, so it is using the defaults above`,
+			);
+
+			if (config.registered && config.path !== null) {
+				const path = config.path;
+				setting.addButton((button) =>
+					button
+						.setButtonText("Open")
+						.setTooltip(path)
+						.onClick(() => {
+							void this.app.workspace.openLinkText(path, "", false);
+						}),
+				);
+			} else {
+				setting.addButton((button) =>
+					button
+						.setButtonText("Create deck note")
+						.setCta()
+						.onClick(() => void this.createDeckNote(deck)),
+				);
+			}
+		}
+	}
+
+	/**
+	 * Register an unconfigured deck, guessing its folder from where its cards
+	 * already sit so the note lands next to them.
+	 */
+	private async createDeckNote(deck: string): Promise<void> {
+		const cards = this.plugin.store.inDeck(deck);
+		const folder = folderForCards(cards.map((card) => card.path));
+		if (folder === null) {
+			new Notice(`"${deck}" has no cards, so there is no folder to put its note in.`);
+			return;
+		}
+		try {
+			const note = await this.plugin.api.createDeckNote(folder, deck);
+			new Notice(`Created ${note.path}`);
+			this.display();
+		} catch (err) {
+			new Notice(`Could not create the deck note: ${String(err)}`);
+		}
 	}
 
 	// -- hotkeys ------------------------------------------------------------
@@ -367,3 +451,4 @@ function parseCount(value: string): number | null {
 function labelFor(actionId: ReviewActionId): string {
 	return REVIEW_ACTIONS.find((a) => a.id === actionId)?.name ?? actionId;
 }
+

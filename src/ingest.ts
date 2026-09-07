@@ -15,7 +15,7 @@ import type {
 	IngestSpec,
 } from "../types";
 import { SCHEMA_VERSION } from "../types";
-import { deckMatches, normaliseDeck } from "./note";
+import { deckSelects, normaliseDeck } from "./note";
 import type { CardStore } from "./store";
 
 /** Semver-ish major-version check: `1.x` documents are accepted by a `1.0` build. */
@@ -155,7 +155,7 @@ export async function ingest(
 				(card) =>
 					card.source_plugin === spec.source_plugin &&
 					!seen.has(card.id) &&
-					pruneDecks.some((deck) => deckMatches(card.deck, deck)),
+					pruneDecks.some((deck) => deckSelects(card.deck, deck)),
 			)
 			.map((card) => card.id);
 		if (stale.length > 0) {

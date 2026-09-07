@@ -24,6 +24,7 @@ import type FlashcardCorePlugin from "../main";
 const REFRESH_DEBOUNCE_MS = 500;
 
 export class FlashcardBlock extends MarkdownRenderChild {
+	private ref: string | undefined;
 	private deck: string | undefined;
 	private view: ReviewView | null = null;
 
@@ -42,7 +43,9 @@ export class FlashcardBlock extends MarkdownRenderChild {
 		private ctx: MarkdownPostProcessorContext,
 	) {
 		super(el);
-		this.deck = parseDeck(source);
+		// The written reference, which may be a name; resolved to an id lazily,
+		// because the deck index is still filling in on a cold start.
+		this.ref = parseDeck(source);
 	}
 
 	onload(): void {
@@ -83,6 +86,8 @@ export class FlashcardBlock extends MarkdownRenderChild {
 	private async refresh(): Promise<void> {
 		if (this.view) return;
 		const generation = ++this.generation;
+
+		this.deck = this.ref === undefined ? undefined : this.plugin.decks.byRef(this.ref);
 
 		if (!this.deck) {
 			this.renderPicker();
@@ -172,7 +177,8 @@ export class FlashcardBlock extends MarkdownRenderChild {
 				stats.counts.learning +
 				stats.counts.review +
 				stats.counts.relearning;
-			if (total === 0) return `${deck} · no cards in this deck yet`;
+			const label = this.plugin.decks.resolve(deck).name;
+			if (total === 0) return `${label} · no cards in this deck yet`;
 			const parts = [
 				`${stats.due_now} due`,
 				`${finite(stats.new_remaining)} new left today`,
@@ -199,7 +205,8 @@ export class FlashcardBlock extends MarkdownRenderChild {
 
 	private async applyDeck(deck: string): Promise<void> {
 		if (!(await this.writeDeck(deck))) return;
-		this.deck = normaliseDeck(deck);
+		this.ref = normaliseDeck(deck);
+		this.deck = this.ref;
 		this.teardownView();
 		await this.refresh();
 	}

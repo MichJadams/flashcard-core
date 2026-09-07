@@ -61,13 +61,12 @@ t("humanInterval formats", () => {
 
 // ---- note helpers ----
 const n = M.note;
-t("deck ancestry / parent / matches", () => {
-  assert.deepEqual(n.deckAncestry("piano/note-reading/treble"), ["piano","piano/note-reading","piano/note-reading/treble"]);
-  assert.equal(n.deckParent("piano/note-reading"), "piano");
-  assert.equal(n.deckParent("piano"), "");
-  assert.ok(n.deckMatches("piano/note-reading", "piano"));
-  assert.ok(!n.deckMatches("pianoforte", "piano"));
-  assert.ok(n.deckMatches("anything", ""));
+t("deck selection is flat — an id with slashes is a name, not a path", () => {
+  assert.ok(n.deckSelects("piano", "piano"));
+  assert.ok(!n.deckSelects("piano/note-reading", "piano"), "no subtree matching");
+  assert.ok(!n.deckSelects("pianoforte", "piano"));
+  assert.ok(n.deckSelects("anything", ""), "an empty selector means every deck");
+  assert.ok(n.deckSelects(" piano / x ", "piano/x"), "both sides are normalised");
 });
 t("file name is deterministic and path-safe", () => {
   const f = n.fileNameForId("blossom:note-reading:c5-treble");
@@ -76,13 +75,20 @@ t("file name is deterministic and path-safe", () => {
   assert.equal(f, n.fileNameForId("blossom:note-reading:c5-treble"));
 });
 t("bare media resolves into the deck folder", () => {
-  assert.equal(n.mediaEmbed("flashcards","piano/note-reading","c5.mp3"),
+  assert.equal(n.mediaEmbed("flashcards/piano/note-reading","c5.mp3"),
     "![[flashcards/piano/note-reading/c5.mp3]]");
-  assert.equal(n.mediaEmbed("flashcards","piano","shared/x.png"), "![[shared/x.png]]");
-  assert.equal(n.mediaEmbed("flashcards","piano","![[already.png]]"), "![[already.png]]");
+  assert.equal(n.mediaEmbed("flashcards/piano","shared/x.png"), "![[shared/x.png]]");
+  assert.equal(n.mediaEmbed("flashcards/piano","![[already.png]]"), "![[already.png]]");
+  // The folder is passed in, so an opaque deck id cannot affect the path.
+  assert.equal(n.mediaEmbed("flashcards/language/MSA/msa_vocab","x.mp3"),
+    "![[flashcards/language/MSA/msa_vocab/x.mp3]]");
+});
+t("cardPath and deckFolder", () => {
+  assert.equal(n.cardPath("flashcards/piano","p:d:k"), "flashcards/piano/p__d__k.md");
+  assert.equal(n.deckFolder("flashcards","deck-a1b2c3d"), "flashcards/deck-a1b2c3d");
 });
 t("renderBody -> parseBody round trip", () => {
-  const body = n.renderBody("flashcards","piano/note-reading", {
+  const body = n.renderBody("flashcards/piano/note-reading", {
     front: "What note is this?", front_image: "treble-c5.png",
     back: "C (third space)", back_audio: "c5.mp3", extra: "Third space of the treble staff.",
   });
@@ -94,7 +100,7 @@ t("renderBody -> parseBody round trip", () => {
   assert.match(parsed.extra, /Third space/);
 });
 t("unknown fields fall through to Extra", () => {
-  const body = n.renderBody("flashcards","d",{front:"f",back:"b",mnemonic:"Every Good Boy"});
+  const body = n.renderBody("flashcards/d",{front:"f",back:"b",mnemonic:"Every Good Boy"});
   assert.match(n.parseBody(body).extra, /\*\*mnemonic:\*\* Every Good Boy/);
 });
 t("hash changes with content, stable otherwise", () => {

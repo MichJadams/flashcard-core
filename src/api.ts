@@ -14,6 +14,7 @@ import type {
 	CardState,
 	DeckConfig,
 	DeckDailyStats,
+	DeckNote,
 	FlashcardCoreAPI,
 	GlobalDeckSettings,
 	IngestResult,
@@ -29,9 +30,9 @@ import type {
 } from "../types";
 import { SCHEMA_VERSION } from "../types";
 import type { DailyLedger } from "./daily";
-import type { DeckConfigStore } from "./decks";
+import type { DeckNoteStore } from "./deck-notes";
 import { ingest } from "./ingest";
-import { deckMatches, normaliseDeck } from "./note";
+import { deckSelects, normaliseDeck } from "./note";
 import { QueueBuilder } from "./queue";
 import type { Scheduler } from "./scheduler";
 import type { CardStore } from "./store";
@@ -39,7 +40,7 @@ import type { CardStore } from "./store";
 export interface ApiDeps {
 	app: App;
 	store: CardStore;
-	decks: DeckConfigStore;
+	decks: DeckNoteStore;
 	ledger: DailyLedger;
 	scheduler: Scheduler;
 	/** Opens the review modal. Injected so the API layer stays UI-agnostic. */
@@ -75,7 +76,7 @@ export class FlashcardCore implements FlashcardCoreAPI {
 	async deleteByDeck(deck: string, sourcePlugin: string): Promise<number> {
 		const ids = this.deps.store
 			.all()
-			.filter((card) => card.source_plugin === sourcePlugin && deckMatches(card.deck, deck))
+			.filter((card) => card.source_plugin === sourcePlugin && deckSelects(card.deck, deck))
 			.map((card) => card.id);
 		return this.deps.store.remove(ids);
 	}
@@ -106,6 +107,14 @@ export class FlashcardCore implements FlashcardCoreAPI {
 		const fromCards = this.deps.store.decks();
 		const configured = this.deps.decks.configuredDecks();
 		return [...new Set([...fromCards, ...configured])].filter((d) => d.length > 0).sort();
+	}
+
+	listDeckNotes(): DeckNote[] {
+		return this.deps.decks.all();
+	}
+
+	resolveDeckRef(ref: string): string {
+		return this.deps.decks.byRef(ref);
 	}
 
 	getDeckStats(deck: string): DeckDailyStats {
@@ -209,7 +218,7 @@ export class FlashcardCore implements FlashcardCoreAPI {
 		return this.deps.decks.resolve(deck);
 	}
 
-	getRawDeckConfig(deck: string): DeckConfig | null {
+	getRawDeckConfig(deck: string): DeckNote | null {
 		return this.deps.decks.raw(deck);
 	}
 
@@ -217,6 +226,12 @@ export class FlashcardCore implements FlashcardCoreAPI {
 		const resolved = await this.deps.decks.set(deck, partial);
 		this.deps.scheduler.invalidate();
 		return resolved;
+	}
+
+	async createDeckNote(folder: string, deck: string, config: DeckConfig = {}): Promise<DeckNote> {
+		const note = await this.deps.decks.createNote(folder, deck, config);
+		this.deps.scheduler.invalidate();
+		return note;
 	}
 
 	getGlobalSettings(): GlobalDeckSettings {

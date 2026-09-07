@@ -88,11 +88,11 @@ const VALID_STATES = new Set(["new", "learning", "review", "relearning"]);
 
 type Frontmatter = Record<string, unknown>;
 
-function asString(v: unknown, fallback: string): string {
+export function asString(v: unknown, fallback: string): string {
 	return typeof v === "string" ? v : fallback;
 }
 
-function asNumber(v: unknown, fallback: number): number {
+export function asNumber(v: unknown, fallback: number): number {
 	return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
@@ -190,26 +190,16 @@ export function normaliseDeck(deck: string): string {
 		.join("/");
 }
 
-/** `piano/note-reading` -> `["piano", "piano/note-reading"]`. */
-export function deckAncestry(deck: string): string[] {
-	const parts = normaliseDeck(deck).split("/").filter(Boolean);
-	const out: string[] = [];
-	for (let i = 0; i < parts.length; i++) out.push(parts.slice(0, i + 1).join("/"));
-	return out;
-}
-
-/** `piano/note-reading` -> `piano`; a top-level deck -> `""`. */
-export function deckParent(deck: string): string {
-	const parts = normaliseDeck(deck).split("/").filter(Boolean);
-	return parts.slice(0, -1).join("/");
-}
-
-/** `true` if `deck` is `ancestor` or lives beneath it. An empty ancestor matches all. */
-export function deckMatches(deck: string, ancestor: string): boolean {
-	const a = normaliseDeck(ancestor);
-	if (a === "") return true;
-	const d = normaliseDeck(deck);
-	return d === a || d.startsWith(`${a}/`);
+/**
+ * `true` when a card in `deck` belongs to the deck `selector` names.
+ *
+ * Decks are flat, so this is equality — an id with slashes in it is a name,
+ * not a path. An empty selector means "every deck", which is how the review
+ * commands and the queue builder express "no deck filter".
+ */
+export function deckSelects(deck: string, selector: string): boolean {
+	const s = normaliseDeck(selector);
+	return s === "" || normaliseDeck(deck) === s;
 }
 
 const ILLEGAL_PATH_CHARS = /[\\/:*?"<>|#^[\]]/g;
@@ -229,16 +219,22 @@ export function fileNameForId(id: string): string {
 	return `${base}.md`;
 }
 
-/** Folder holding a deck's card notes and its media. */
+/**
+ * Fallback folder for a deck with no deck note: `<root>/<id>`.
+ *
+ * A registered deck's folder comes from its note instead, which is the only
+ * thing that keeps cards landing next to their siblings once a deck id stops
+ * resembling a path.
+ */
 export function deckFolder(root: string, deck: string): string {
 	const d = normaliseDeck(deck);
 	const r = root.replace(/^\/+|\/+$/g, "");
 	return d ? `${r}/${d}` : r;
 }
 
-/** Full vault path of the note backing a card. */
-export function cardPath(root: string, deck: string, id: string): string {
-	return `${deckFolder(root, deck)}/${fileNameForId(id)}`;
+/** Full vault path of the note backing a card, given its deck's folder. */
+export function cardPath(folder: string, id: string): string {
+	return `${folder.replace(/\/+$/, "")}/${fileNameForId(id)}`;
 }
 
 /** Short, stable, non-cryptographic digest. Only ever used for change detection. */
@@ -270,12 +266,12 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|avif|bmp)$/i;
  * vault-relative path and used as-is. A value that is already an embed or a
  * Markdown image is passed straight through, so a generator can hand-roll one.
  */
-export function mediaEmbed(root: string, deck: string, value: string): string {
+export function mediaEmbed(folder: string, value: string): string {
 	const v = value.trim();
 	if (v.length === 0) return "";
 	if (v.startsWith("![[") || v.startsWith("![")) return v;
 	if (v.includes("/")) return `![[${v.replace(/^\/+/, "")}]]`;
-	return `![[${deckFolder(root, deck)}/${v}]]`;
+	return `![[${folder.replace(/\/+$/, "")}/${v}]]`;
 }
 
 /** `true` if the file name looks like audio we should offer to autoplay. */
@@ -313,8 +309,8 @@ function section(name: string, parts: (string | undefined)[]): string | null {
 }
 
 /** Render the Markdown body of a card note from its fields. */
-export function renderBody(root: string, deck: string, fields: CardFields): string {
-	const embed = (v: string | undefined) => (v ? mediaEmbed(root, deck, v) : undefined);
+export function renderBody(folder: string, fields: CardFields): string {
+	const embed = (v: string | undefined) => (v ? mediaEmbed(folder, v) : undefined);
 
 	const extras: string[] = [];
 	if (fields.extra) extras.push(fields.extra);

@@ -22,7 +22,7 @@ import {
 	composeNote,
 	contentHash,
 	deckFolder,
-	deckMatches,
+	deckSelects,
 	fsrsFrontmatter,
 	generatorFrontmatter,
 	isCardFrontmatter,
@@ -52,11 +52,24 @@ export class CardStore {
 	constructor(
 		private app: App,
 		private root: string,
+		/**
+		 * A registered deck's own folder, or `null` when it has no deck note.
+		 *
+		 * Injected rather than derived: once a deck id is an opaque name, the
+		 * only thing that knows where its cards belong is its deck note. Without
+		 * this, regenerating a deck would scatter its cards into `<root>/<id>`.
+		 */
+		private folderForDeck: (deck: string) => string | null = () => null,
 	) {}
 
-	/** Change the folder new cards are written to. Does not move existing notes. */
+	/** Change the fallback folder for decks with no note. Moves nothing. */
 	setRoot(root: string): void {
 		this.root = root;
+	}
+
+	/** Where this deck's cards and media belong. */
+	private folderFor(deck: string): string {
+		return this.folderForDeck(deck) ?? deckFolder(this.root, deck);
 	}
 
 	/** Perform the initial scan and start watching for changes. */
@@ -159,18 +172,17 @@ export class CardStore {
 		return [...this.byId.values()];
 	}
 
-	/** Cards in a deck subtree. An omitted deck means every card. */
+	/** Cards in a deck. An omitted deck means every card. */
 	inDeck(deck?: string): CardRecord[] {
 		if (deck === undefined || normaliseDeck(deck) === "") return this.all();
-		return this.all().filter((c) => deckMatches(c.deck, deck));
+		return this.all().filter((c) => deckSelects(c.deck, deck));
 	}
 
-	/** Every deck that has at least one card, including intermediate parents. */
+	/** Every deck id that has at least one card. */
 	decks(): string[] {
 		const set = new Set<string>();
 		for (const card of this.byId.values()) {
-			const parts = card.deck.split("/").filter(Boolean);
-			for (let i = 0; i < parts.length; i++) set.add(parts.slice(0, i + 1).join("/"));
+			if (card.deck !== "") set.add(card.deck);
 		}
 		return [...set].sort();
 	}
@@ -203,7 +215,8 @@ export class CardStore {
 	): Promise<WriteOutcome> {
 		const deck = normaliseDeck(spec.deck);
 		const generator = generatorFrontmatter(spec, sourcePlugin);
-		const body = renderBody(this.root, deck, spec.fields);
+		const folder = this.folderFor(deck);
+		const body = renderBody(folder, spec.fields);
 		const hash = contentHash(generator, body);
 
 		const existing = this.byId.get(spec.id);
@@ -221,16 +234,16 @@ export class CardStore {
 			if (next !== raw) await this.app.vault.modify(file, next);
 
 			// A deck change means the note belongs in a different folder.
-			const desired = normalizePath(cardPath(this.root, deck, spec.id));
+			const desired = normalizePath(cardPath(folder, spec.id));
 			if (desired !== file.path) {
-				await this.ensureFolder(deckFolder(this.root, deck));
+				await this.ensureFolder(folder);
 				await this.app.fileManager.renameFile(file, desired).catch(() => undefined);
 			}
 			this.indexFile(file, this.app.metadataCache.getFileCache(file));
 			return "updated";
 		}
 
-		const path = normalizePath(cardPath(this.root, deck, spec.id));
+		const path = normalizePath(cardPath(folder, spec.id));
 		const atPath = this.app.vault.getAbstractFileByPath(path);
 		if (atPath instanceof TFile) {
 			// A note already occupies the path but was not indexed as this card —
@@ -246,7 +259,7 @@ export class CardStore {
 			return "updated";
 		}
 
-		await this.ensureFolder(deckFolder(this.root, deck));
+		await this.ensureFolder(folder);
 		const created = await this.app.vault.create(
 			path,
 			composeNote(generator, freshState(), {}, body, hash),

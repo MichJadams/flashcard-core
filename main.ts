@@ -12,8 +12,9 @@ import { Notice, Plugin, TFile } from "obsidian";
 import type { FlashcardCoreAPI, QueueItem } from "./types";
 import { FlashcardCore } from "./src/api";
 import { DailyLedger } from "./src/daily";
-import { DeckConfigStore } from "./src/decks";
+import { DeckNoteStore } from "./src/deck-notes";
 import { DeckPickerModal } from "./src/deck-picker";
+import { DeckSettingsBlock, DeckStatsBlock } from "./src/deck-block";
 import { FlashcardBlock } from "./src/flashcard-block";
 import { DEFAULT_HOTKEYS, withDefaults } from "./src/hotkeys";
 import { blockedBy } from "./src/queue";
@@ -29,7 +30,7 @@ import {
 export default class FlashcardCorePlugin extends Plugin {
 	settings!: FlashcardCoreSettings;
 	scheduler!: Scheduler;
-	decks!: DeckConfigStore;
+	decks!: DeckNoteStore;
 	ledger!: DailyLedger;
 	store!: CardStore;
 
@@ -48,19 +49,33 @@ export default class FlashcardCorePlugin extends Plugin {
 		await this.loadSettings();
 
 		this.scheduler = new Scheduler();
-		this.decks = new DeckConfigStore(this.app, this.settings.root);
-		await this.decks.load();
+
+		// Deck config lives in the vault's deck notes; only the collection-wide
+		// defaults are the plugin's own, so they ride along in `data.json`.
+		this.decks = new DeckNoteStore(
+			this.app,
+			() => this.settings.deckGlobals,
+			async (next) => {
+				this.settings.deckGlobals = next;
+				await this.saveSettings();
+			},
+		);
 
 		this.ledger = new DailyLedger(
 			this.settings.daily,
-			this.decks.global().day_start_hour,
+			this.settings.deckGlobals.day_start_hour,
 			async (record) => {
 				this.settings.daily = record;
 				await this.saveSettings();
 			},
 		);
 
-		this.store = new CardStore(this.app, this.settings.root);
+		// Cards belong in their deck's own folder when the deck declares one.
+		this.store = new CardStore(
+			this.app,
+			this.settings.root,
+			(deck) => this.decks.resolve(deck).folder,
+		);
 		this.core = new FlashcardCore({
 			app: this.app,
 			store: this.store,
@@ -72,12 +87,23 @@ export default class FlashcardCorePlugin extends Plugin {
 		this.api = this.core;
 
 		// The metadata cache is not populated until layout is ready, so the
-		// initial scan has to wait or it finds nothing on a cold start.
-		this.app.workspace.onLayoutReady(() => this.store.start());
+		// initial scans have to wait or they find nothing on a cold start.
+		this.app.workspace.onLayoutReady(() => {
+			this.decks.start();
+			this.store.start();
+		});
 
 		// A deck's queue, in the note. `deck:` inside the block says which.
 		this.registerMarkdownCodeBlockProcessor("flashcard", (source, el, ctx) => {
 			ctx.addChild(new FlashcardBlock(this, source, el, ctx));
+		});
+
+		// The two halves of a deck note: what the deck looks like, and its knobs.
+		this.registerMarkdownCodeBlockProcessor("flashcard-deck-stats", (source, el, ctx) => {
+			ctx.addChild(new DeckStatsBlock(this, source, el, ctx));
+		});
+		this.registerMarkdownCodeBlockProcessor("flashcard-deck-settings", (source, el, ctx) => {
+			ctx.addChild(new DeckSettingsBlock(this, source, el, ctx));
 		});
 
 		this.addSettingTab(new FlashcardCoreSettingTab(this.app, this));
@@ -90,6 +116,7 @@ export default class FlashcardCorePlugin extends Plugin {
 
 	onunload(): void {
 		this.store?.stop();
+		this.decks?.stop();
 	}
 
 	// -- settings -----------------------------------------------------------
@@ -114,10 +141,15 @@ export default class FlashcardCorePlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	/** Re-point the stores after the root folder setting changes. */
+	/**
+	 * Re-point the card store after the root folder setting changes.
+	 *
+	 * Deck config needs nothing here: deck notes are found by their
+	 * frontmatter, wherever they live, so a wrong root can no longer silently
+	 * cost every deck its settings.
+	 */
 	async applyRoot(): Promise<void> {
 		this.store.setRoot(this.settings.root);
-		await this.decks.relocate(this.settings.root);
 		this.scheduler.invalidate();
 		this.store.rebuild();
 	}
@@ -178,7 +210,7 @@ export default class FlashcardCorePlugin extends Plugin {
 					const { counts } = stats;
 					new Notice(
 						[
-							`${deck ?? "All decks"}`,
+							deck === undefined ? "All decks" : this.decks.resolve(deck).name,
 							`due now: ${stats.due_now}`,
 							`new left today: ${stats.new_remaining}`,
 							`reviews left today: ${stats.reviews_remaining}`,

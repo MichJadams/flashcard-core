@@ -6,7 +6,7 @@
  *   2. **Order.** A registered {@link NewCardOrderProvider} for the deck decides
  *      the order; with no provider, `fc_new_order` ascending.
  *   3. **Limit.** Take as many as the deck's remaining daily budget allows,
- *      rolled up through parent decks and the global cap.
+ *      then as many as the collection-wide cap allows.
  *
  * The split matters: a provider can reorder freely but can neither smuggle in a
  * gated card nor exceed a limit. Those are the core's to enforce.
@@ -20,8 +20,8 @@ import type {
 	ResolvedDeckConfig,
 } from "../types";
 import type { DailyLedger } from "./daily";
-import type { DeckConfigStore } from "./decks";
-import { deckAncestry, deckMatches, normaliseDeck } from "./note";
+import type { DeckNoteStore } from "./deck-notes";
+import { deckSelects, normaliseDeck } from "./note";
 import type { CardStore } from "./store";
 
 // ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ export class Budget {
 	}
 
 	/** Budget for introducing new cards. */
-	static forNew(decks: DeckConfigStore, ledger: DailyLedger, now: Date): Budget {
+	static forNew(decks: DeckNoteStore, ledger: DailyLedger, now: Date): Budget {
 		const cap = decks.global().new_per_day_cap;
 		const globalRemaining =
 			cap === null ? Number.POSITIVE_INFINITY : Math.max(0, cap - ledger.introducedTotal(now));
@@ -104,7 +104,7 @@ export class Budget {
 	}
 
 	/** Budget for showing due reviews. */
-	static forReviews(decks: DeckConfigStore, ledger: DailyLedger, now: Date): Budget {
+	static forReviews(decks: DeckNoteStore, ledger: DailyLedger, now: Date): Budget {
 		const cap = decks.global().reviews_per_day_cap;
 		const globalRemaining =
 			cap === null ? Number.POSITIVE_INFINITY : Math.max(0, cap - ledger.reviewsTotal(now));
@@ -138,18 +138,15 @@ export class Budget {
 		return remaining;
 	}
 
-	/** How many more cards this deck's subtree may take right now. */
+	/** How many more cards this deck may take right now. */
 	remaining(deck: string, kind: "new" | "review"): number {
-		let least = this.global;
-		for (const step of deckAncestry(deck)) least = Math.min(least, this.limitFor(step, kind));
-		return least;
+		return Math.min(this.global, this.limitFor(normaliseDeck(deck), kind));
 	}
 
-	/** Spend one unit against a deck, its ancestors, and the global pool. */
+	/** Spend one unit against a deck and the global pool. */
 	take(deck: string, kind: "new" | "review"): void {
-		for (const step of deckAncestry(deck)) {
-			this.perDeck.set(step, Math.max(0, this.limitFor(step, kind) - 1));
-		}
+		const key = normaliseDeck(deck);
+		this.perDeck.set(key, Math.max(0, this.limitFor(key, kind) - 1));
 		if (Number.isFinite(this.global)) this.global -= 1;
 	}
 }
@@ -160,7 +157,7 @@ export class Budget {
 
 export interface QueueDeps {
 	store: CardStore;
-	decks: DeckConfigStore;
+	decks: DeckNoteStore;
 	ledger: DailyLedger;
 	/** Registered ordering providers, most recently registered last. */
 	providers: () => NewCardOrderProvider[];
@@ -231,7 +228,7 @@ export class QueueBuilder {
 		// Layer 1: eligibility.
 		const candidates = all
 			.filter((card) => card.fsrs.state === "new")
-			.filter((card) => deck === undefined || deckMatches(card.deck, deck))
+			.filter((card) => deck === undefined || deckSelects(card.deck, deck))
 			.filter((card) => this.deps.decks.resolve(card.deck).enabled)
 			.filter((card) => isEligible(card, index))
 			.sort(byNewOrder);
@@ -275,24 +272,25 @@ export class QueueBuilder {
 	}
 
 	/**
-	 * The provider governing a deck: the one whose `deck` is the longest prefix
-	 * of the target. Ties go to the most recently registered.
+	 * The provider governing a deck.
+	 *
+	 * A provider scoped to this exact deck wins over one registered for every
+	 * deck, so a generator can order its own deck without having to out-rank a
+	 * collection-wide fallback. Ties go to the most recently registered.
 	 */
 	private providerFor(deck: string): NewCardOrderProvider | null {
-		let best: NewCardOrderProvider | null = null;
-		let bestLength = -1;
+		let exact: NewCardOrderProvider | null = null;
+		let catchAll: NewCardOrderProvider | null = null;
+		const target = normaliseDeck(deck);
 		for (const provider of this.deps.providers()) {
 			const scope = normaliseDeck(provider.deck);
-			if (!deckMatches(deck, scope)) continue;
-			if (scope.length >= bestLength) {
-				best = provider;
-				bestLength = scope.length;
-			}
+			if (scope === "") catchAll = provider;
+			else if (scope === target) exact = provider;
 		}
-		return best;
+		return exact ?? catchAll;
 	}
 
-	/** Walk a list, taking each card only while its whole deck chain has room. */
+	/** Walk a list, taking each card only while its deck still has room. */
 	private applyBudget(cards: CardRecord[], budget: Budget, kind: "new" | "review"): CardRecord[] {
 		const taken: CardRecord[] = [];
 		for (const card of cards) {

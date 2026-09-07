@@ -8,21 +8,24 @@ const t = async (name, fn) => {
 	catch (e) { console.log("FAIL  " + name + "\n      " + (e.stack ?? e.message)); process.exitCode = 1; }
 };
 
-const deckFile = {
-	version: 1,
-	global: { new_per_day_cap: null, reviews_per_day_cap: null, day_start_hour: 4,
-		defaults: { new_per_day: 20, max_reviews_per_day: 200, enabled: true, fsrs_params: { request_retention: 0.9 } } },
-	decks: { "piano/note-reading": { new_per_day: 2 } },
+const deckGlobals = {
+	new_per_day_cap: null, reviews_per_day_cap: null, day_start_hour: 4,
+	defaults: { new_per_day: 20, max_reviews_per_day: 200, enabled: true, fsrs_params: { request_retention: 0.9 } },
 };
 
-async function fixture(deckOverride) {
+/** `deckConfig` is the frontmatter of the deck note governing `piano/note-reading`. */
+async function fixture(deckConfig = { new_per_day: 2 }) {
 	const { app, files } = makeApp();
-	files.set("flashcards/_decks.json", JSON.stringify(deckOverride ?? deckFile));
+	files.set(
+		"flashcards/piano/note-reading/flashcard-core-deck.md",
+		`---\n${JSON.stringify({ fc: "deck", id: "piano/note-reading", ...deckConfig })}\n---\n`,
+	);
 	const scheduler = new M.Scheduler();
-	const decks = new M.DeckConfigStore(app, "flashcards");
-	await decks.load();
+	let globals = structuredClone(deckGlobals);
+	const decks = new M.DeckNoteStore(app, () => globals, async (next) => { globals = next; });
+	decks.start();
 	const ledger = new M.DailyLedger(undefined, 4, async () => {});
-	const store = new M.CardStore(app, "flashcards");
+	const store = new M.CardStore(app, "flashcards", (deck) => decks.resolve(deck).folder);
 	store.start();
 	const providers = [];
 	const core = new M.FlashcardCore({
@@ -169,13 +172,13 @@ await t("deleteCards and deleteByDeck", async () => {
 	await f.core.upsertCards(spec([card("c5"), card("d5")]));
 	await f.core.upsertCards({ schema_version: "1.0", source_plugin: "other",
 		cards: [{ id: "other:note-reading:x", deck: "piano/note-reading", fields: { front: "a", back: "b" } }] });
-	assert.equal(f.core.getCards("piano").length, 3);
+	assert.equal(f.core.getCards("piano/note-reading").length, 3);
 
 	assert.equal(await f.core.deleteCards(["blossom:note-reading:c5", "nope"]), 1);
-	assert.equal(f.core.getCards("piano").length, 2);
+	assert.equal(f.core.getCards("piano/note-reading").length, 2);
 
-	assert.equal(await f.core.deleteByDeck("piano", "blossom"), 1);
-	const left = f.core.getCards("piano");
+	assert.equal(await f.core.deleteByDeck("piano/note-reading", "blossom"), 1);
+	const left = f.core.getCards("piano/note-reading");
 	assert.equal(left.length, 1);
 	assert.equal(left[0].source_plugin, "other", "another plugin's cards are untouched");
 });
@@ -185,7 +188,7 @@ await t("prune_decks removes cards the generator dropped", async () => {
 	await f.core.upsertCards(spec([card("c5"), card("d5"), card("e5")]));
 	const r = await f.core.upsertCards(spec([card("c5")], { prune_decks: ["piano/note-reading"] }));
 	assert.equal(r.pruned.length, 2);
-	assert.deepEqual(f.core.getCards("piano").map((c) => c.id), ["blossom:note-reading:c5"]);
+	assert.deepEqual(f.core.getCards("piano/note-reading").map((c) => c.id), ["blossom:note-reading:c5"]);
 });
 
 await t("changing a card's deck moves the note", async () => {
@@ -215,7 +218,8 @@ await t("introducing spends the daily budget", async () => {
 	await f.core.upsertCards(spec([card("a", { new_order: 1 }), card("b", { new_order: 2 }), card("c", { new_order: 3 })]));
 	await f.core.reviewCard("blossom:note-reading:a", 3);
 	assert.equal(f.ledger.introduced("piano/note-reading"), 1);
-	assert.equal(f.ledger.introduced("piano"), 1, "rolled up to the parent");
+	assert.equal(f.ledger.introduced("piano"), 0, "decks are flat — nothing rolls up");
+	assert.equal(f.ledger.introducedTotal(), 1, "the collection-wide pool still sees it");
 
 	const q = await f.core.buildQueue({ deck: "piano/note-reading", no_new: false });
 	const news = q.filter((i) => i.reason === "new");
@@ -267,7 +271,7 @@ await t("a provider reorders, but cannot beat gating or the limit", async () => 
 		card("gated", { new_order: 0, prerequisites: ["blossom:note-reading:never"] }),
 	]));
 	f.core.registerNewCardOrderProvider({
-		id: "test", deck: "piano",
+		id: "test", deck: "piano/note-reading",
 		provide: () => [
 			"blossom:note-reading:gated",
 			"blossom:note-reading:c",
@@ -307,9 +311,10 @@ await t("the most specific provider wins", async () => {
 });
 
 await t("disabled decks are skipped", async () => {
-	const f = await fixture({ ...deckFile, decks: { ...deckFile.decks, "piano/note-reading": { enabled: false } } });
+	const f = await fixture({ enabled: false });
 	await f.core.upsertCards(spec([card("a")]));
-	assert.equal((await f.core.buildQueue({ deck: "piano" })).length, 0);
+	assert.equal((await f.core.buildQueue({ deck: "piano/note-reading" })).length, 0);
+	assert.equal((await f.core.buildQueue()).length, 0, "and stays out of the all-decks queue");
 });
 
 await t("due reviews come before new cards, learning first", async () => {
@@ -404,10 +409,28 @@ await t("getDeckStats reports counts and remaining budget", async () => {
 	assert.equal(s.counts.new, 2);
 });
 
-await t("listDecks includes intermediate parents", async () => {
+await t("listDecks reports the decks that exist, and only those", async () => {
 	const f = await fixture();
 	await f.core.upsertCards(spec([card("a", { deck: "piano/note-reading/treble" })]));
-	assert.deepEqual(f.core.listDecks(), ["piano", "piano/note-reading", "piano/note-reading/treble"]);
+	// `piano/note-reading` is there because it has a deck note; `treble` because
+	// it has a card. No `piano` is invented from the shared prefix.
+	assert.deepEqual(f.core.listDecks(), ["piano/note-reading", "piano/note-reading/treble"]);
+});
+
+await t("listDeckNotes reports registered decks only", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a", { deck: "unregistered" })]));
+	assert.deepEqual(f.core.listDeckNotes().map((n) => n.id), ["piano/note-reading"]);
+	assert.equal(f.core.getDeckConfig("unregistered").registered, false);
+});
+
+await t("createDeckNote registers a deck that only had cards", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a", { deck: "loose" })]));
+	assert.equal(f.core.getDeckConfig("loose").registered, false);
+	const note = await f.core.createDeckNote("flashcards/loose", "loose", { name: "Loose" });
+	assert.equal(note.path, "flashcards/loose/flashcard-core-deck.md");
+	assert.ok(f.files.has("flashcards/loose/flashcard-core-deck.md"));
 });
 
 await t("setDeckConfig through the API takes effect immediately", async () => {
@@ -421,6 +444,50 @@ await t("setDeckConfig through the API takes effect immediately", async () => {
 await t("unknown card id throws a useful error", async () => {
 	const f = await fixture();
 	await assert.rejects(() => f.core.reviewCard("nope", 3), /unknown card id/);
+});
+
+// An opaque deck id names nothing on disk, so the deck note's folder is the
+// only thing that can say where its cards and media belong.
+await t("cards land in the deck note's folder, not <root>/<id>", async () => {
+	const f = await fixture();
+	f.files.set(
+		"flashcards/language/MSA/msa_vocab/flashcard-core-deck.md",
+		`---\n${JSON.stringify({ fc: "deck", id: "deck-a1b2c3d" })}\n---\n`,
+	);
+	f.decks.rebuild();
+	await f.core.upsertCards(spec([card("z", { deck: "deck-a1b2c3d" })]));
+
+	const path = "flashcards/language/MSA/msa_vocab/blossom__note-reading__z.md";
+	assert.ok(f.files.has(path), `expected ${path}`);
+	assert.ok(!f.files.has("flashcards/deck-a1b2c3d/blossom__note-reading__z.md"));
+	assert.match(
+		f.files.get(path),
+		/!\[\[flashcards\/language\/MSA\/msa_vocab\/z\.mp3\]\]/,
+		"media resolves against the same folder",
+	);
+});
+
+await t("a deck with no note falls back to <root>/<id>", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("y", { deck: "loose-deck" })]));
+	assert.ok(f.files.has("flashcards/loose-deck/blossom__note-reading__y.md"));
+});
+
+await t("re-pointing a deck's folder moves its cards on regeneration", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("m")]));
+	const before = "flashcards/piano/note-reading/blossom__note-reading__m.md";
+	assert.ok(f.files.has(before));
+
+	// The deck note moves; the id, and so every card's `deck` field, does not.
+	f.files.delete("flashcards/piano/note-reading/flashcard-core-deck.md");
+	f.files.set(
+		"flashcards/moved/flashcard-core-deck.md",
+		`---\n${JSON.stringify({ fc: "deck", id: "piano/note-reading" })}\n---\n`,
+	);
+	f.decks.rebuild();
+	await f.core.upsertCards(spec([card("m", { fields: { front: "v2", back: "v2" } })]));
+	assert.ok(f.files.has("flashcards/moved/blossom__note-reading__m.md"), "followed the note");
 });
 
 console.log(`\n${pass} assertions passed`);

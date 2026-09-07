@@ -37,11 +37,16 @@ export class DeckPickerModal extends FuzzySuggestModal<DeckChoice> {
 	}
 
 	getItems(): DeckChoice[] {
-		const decks = this.plugin.api.listDecks().map<DeckChoice>((deck) => ({
-			deck,
-			label: deck,
-			stats: this.plugin.api.getDeckStats(deck),
-		}));
+		const decks = this.plugin.api.listDecks().map<DeckChoice>((deck) => {
+			// Search on both: the pretty name is what the user thinks in, the id
+			// is what they typed into a code block.
+			const { name } = this.plugin.decks.resolve(deck);
+			return {
+				deck,
+				label: name === deck ? deck : `${name}  (${deck})`,
+				stats: this.plugin.api.getDeckStats(deck),
+			};
+		});
 		if (this.options.includeAll === false) return decks;
 		const all: DeckChoice = { deck: "", label: "All decks", stats: null };
 		return [all, ...decks];
