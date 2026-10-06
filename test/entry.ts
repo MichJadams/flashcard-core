@@ -10,5 +10,5 @@ export { FlashcardCore } from "../src/api";
 export { ingest } from "../src/ingest";
 export { TFile, TFolder } from "obsidian";
 export { hasAudio } from "../src/review-modal";
-export { parseDeck } from "../src/flashcard-block";
+export { parseDeck, parseSpeed } from "../src/flashcard-block";
 export * as hk from "../src/hotkeys";

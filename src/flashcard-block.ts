@@ -26,6 +26,8 @@ const REFRESH_DEBOUNCE_MS = 500;
 export class FlashcardBlock extends MarkdownRenderChild {
 	private ref: string | undefined;
 	private deck: string | undefined;
+	/** `default speed:` from the block — slower audio for sentences that are nearly there. */
+	private speed: number | undefined;
 	private view: ReviewView | null = null;
 
 	/** Bindings the mounted view asked for; empty whenever nothing is mounted. */
@@ -46,6 +48,7 @@ export class FlashcardBlock extends MarkdownRenderChild {
 		// The written reference, which may be a name; resolved to an id lazily,
 		// because the deck index is still filling in on a cold start.
 		this.ref = parseDeck(source);
+		this.speed = parseSpeed(source);
 	}
 
 	onload(): void {
@@ -106,6 +109,7 @@ export class FlashcardBlock extends MarkdownRenderChild {
 		const host = this.containerEl.createDiv();
 		this.view = new ReviewView(this.plugin.app, this.plugin, host, this.deck, queue, {
 			bindKey: (hotkey, run) => this.keys.push({ hotkey, run }),
+			playbackRate: this.speed,
 			// No close: a block stays on the page. When the queue runs dry it
 			// goes back to the message rather than stranding a summary.
 			onEmpty: () => {
@@ -300,6 +304,38 @@ export function parseDeck(source: string): string | undefined {
  * Does this keydown match a binding? Modifiers must agree exactly, so `1`
  * grades and `Ctrl+1` — a tab switch — does not.
  */
+/**
+ * The slowest and fastest speeds a block may ask for. Browsers accept a wider
+ * range, but below a quarter speed speech smears into noise and above four
+ * times it is gibberish — neither helps anyone hear a sentence.
+ */
+const MIN_SPEED = 0.25;
+const MAX_SPEED = 4;
+
+/**
+ * The speed this block plays card audio at, or `undefined` for normal speed.
+ *
+ * `default speed: 0.75` is the written form; `speed:` is accepted as the short
+ * one, and the value may carry an `x` (`0.75x`) or be a percentage (`75%`).
+ * "Default" because it is where playback starts — the player's own controls
+ * still change it for one listen. A value that is not a usable number is
+ * ignored rather than refused: a typo should cost the slowdown, not the block.
+ */
+export function parseSpeed(source: string): number | undefined {
+	for (const raw of source.split("\n")) {
+		const keyed = /^\s*(?:default[\s_-]*)?speed\s*:\s*(.*)$/i.exec(raw);
+		if (!keyed) continue;
+
+		const value = keyed[1].trim().replace(/^["']|["']$/g, "");
+		const match = /^(\d*\.?\d+)\s*(x|%)?$/i.exec(value);
+		if (!match) return undefined;
+		const n = Number(match[1]) / (match[2] === "%" ? 100 : 1);
+		if (!Number.isFinite(n) || n <= 0) return undefined;
+		return Math.min(MAX_SPEED, Math.max(MIN_SPEED, n));
+	}
+	return undefined;
+}
+
 function matches(evt: KeyboardEvent, hotkey: ParsedHotkey): boolean {
 	if (evt.key.toLowerCase() !== hotkey.key.toLowerCase()) return false;
 	const wanted = new Set(hotkey.modifiers.map((m) => m.toLowerCase()));

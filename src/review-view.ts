@@ -35,6 +35,11 @@ export interface ReviewViewHost {
 	close?: () => void;
 	/** The queue emptied and a refill found nothing more. */
 	onEmpty?: () => void;
+	/**
+	 * The speed card audio starts at, 1 being as recorded. A code block can
+	 * ask for slower audio; the modal has no such option and plays it as is.
+	 */
+	playbackRate?: number;
 }
 
 interface GradeButton {
@@ -359,11 +364,36 @@ export class ReviewView {
 		}
 	}
 
-	/** Play the first audio embed in a side, if the user wants that. */
+	/**
+	 * Set a side's speed, then play its first audio embed if the user wants that.
+	 *
+	 * The speed goes on every player on the side, not just the one autoplayed,
+	 * so pressing a player's own play button is slowed too.
+	 */
 	private autoplay(el: HTMLElement): void {
-		if (!this.plugin.settings.autoplayAudio) return;
 		// Obsidian mounts the <audio> element asynchronously after render.
-		window.setTimeout(() => play(findAudio(el)), 60);
+		window.setTimeout(() => {
+			this.applyRate(el);
+			if (this.plugin.settings.autoplayAudio) play(findAudio(el));
+		}, 60);
+	}
+
+	/**
+	 * Give every player under `el` the host's speed.
+	 *
+	 * The default rate is set as well as the current one, because loading a
+	 * source resets `playbackRate` to `defaultPlaybackRate` — set only the
+	 * first, and a player that loads late would quietly play at full speed.
+	 * Pitch is kept, so slowed speech sounds slowed rather than deeper.
+	 */
+	private applyRate(el: HTMLElement | null): void {
+		const rate = this.host.playbackRate;
+		if (!el || rate === undefined) return;
+		for (const audio of Array.from(el.querySelectorAll("audio"))) {
+			audio.defaultPlaybackRate = rate;
+			audio.playbackRate = rate;
+			audio.preservesPitch = true;
+		}
 	}
 
 	/**
@@ -374,6 +404,8 @@ export class ReviewView {
 	 * which is exactly when a listening prompt gets replayed most.
 	 */
 	private replayAudio(): void {
+		// Again here, in case the player mounted after the side's own pass.
+		this.applyRate(this.cardEl);
 		play(findAudio(this.audioScope) ?? findAudio(this.cardEl));
 	}
 

@@ -33,7 +33,7 @@ __export(main_exports, {
   default: () => FlashcardCorePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian11 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/api.ts
 var import_obsidian2 = require("obsidian");
@@ -820,11 +820,27 @@ var FlashcardCore = class {
     if (!card)
       throw new Error(`unknown card id "${id}"`);
     const params = this.deps.decks.resolve(card.deck).fsrs_params;
-    const reset = this.deps.scheduler.forget(card.fsrs, params);
-    const updated = await this.deps.store.writeState(id, reset);
+    const reset2 = this.deps.scheduler.forget(card.fsrs, params);
+    const updated = await this.deps.store.writeState(id, reset2);
     if (!updated)
       throw new Error(`could not write state for "${id}"`);
     return updated;
+  }
+  async resetDeck(deck) {
+    const key = normaliseDeck(deck);
+    const cards = this.deps.store.inDeck(key);
+    let reset2 = 0;
+    for (const card of cards) {
+      if (card.fsrs.state === "new" && card.fsrs.reps === 0)
+        continue;
+      const params = this.deps.decks.resolve(card.deck).fsrs_params;
+      const next = this.deps.scheduler.forget(card.fsrs, params);
+      if (await this.deps.store.writeState(card.id, next))
+        reset2 += 1;
+    }
+    await this.deps.ledger.clearDeck(key);
+    this.deps.scheduler.invalidate();
+    return reset2;
   }
   // -- configuration ------------------------------------------------------
   getDeckConfig(deck) {
@@ -952,6 +968,24 @@ var DailyLedger = class {
     const key = normaliseDeck(deck);
     record.reviews[key] = ((_a = record.reviews[key]) != null ? _a : 0) + 1;
     record.reviews_total += 1;
+    await this.persist(record);
+  }
+  /**
+   * Clear one deck's counters for today, leaving every other deck alone.
+   *
+   * The totals are decremented rather than recomputed, because they are the
+   * global caps' own budget and must stay consistent with the per-deck rows.
+   */
+  async clearDeck(deck, now = /* @__PURE__ */ new Date()) {
+    var _a, _b;
+    const record = this.current(now);
+    const key = normaliseDeck(deck);
+    const introduced = (_a = record.introduced[key]) != null ? _a : 0;
+    const reviews = (_b = record.reviews[key]) != null ? _b : 0;
+    delete record.introduced[key];
+    delete record.reviews[key];
+    record.introduced_total = Math.max(0, record.introduced_total - introduced);
+    record.reviews_total = Math.max(0, record.reviews_total - reviews);
     await this.persist(record);
   }
   /** Wipe today's counters. Exposed as a command for when a limit was wrong. */
@@ -1693,8 +1727,9 @@ var ReviewView = class {
       return;
     }
     const item = entry.item;
+    const deckLabel = this.plugin.decks.resolve(item.card.deck).name;
     this.progressEl.setText(
-      `${this.session.remaining} left \xB7 ${item.card.deck} \xB7 ${labelFor(entry)}`
+      `${this.session.remaining} left \xB7 ${deckLabel} \xB7 ${labelFor(entry)}`
     );
     this.resetRenderHost();
     this.cardEl.empty();
@@ -1847,11 +1882,36 @@ var ReviewView = class {
       el.createEl("pre", { text });
     }
   }
-  /** Play the first audio embed in a side, if the user wants that. */
+  /**
+   * Set a side's speed, then play its first audio embed if the user wants that.
+   *
+   * The speed goes on every player on the side, not just the one autoplayed,
+   * so pressing a player's own play button is slowed too.
+   */
   autoplay(el) {
-    if (!this.plugin.settings.autoplayAudio)
+    window.setTimeout(() => {
+      this.applyRate(el);
+      if (this.plugin.settings.autoplayAudio)
+        play(findAudio(el));
+    }, 60);
+  }
+  /**
+   * Give every player under `el` the host's speed.
+   *
+   * The default rate is set as well as the current one, because loading a
+   * source resets `playbackRate` to `defaultPlaybackRate` — set only the
+   * first, and a player that loads late would quietly play at full speed.
+   * Pitch is kept, so slowed speech sounds slowed rather than deeper.
+   */
+  applyRate(el) {
+    const rate = this.host.playbackRate;
+    if (!el || rate === void 0)
       return;
-    window.setTimeout(() => play(findAudio(el)), 60);
+    for (const audio of Array.from(el.querySelectorAll("audio"))) {
+      audio.defaultPlaybackRate = rate;
+      audio.playbackRate = rate;
+      audio.preservesPitch = true;
+    }
   }
   /**
    * Restart the audio on the side currently showing. Bound to `r`.
@@ -1862,6 +1922,7 @@ var ReviewView = class {
    */
   replayAudio() {
     var _a;
+    this.applyRate(this.cardEl);
     play((_a = findAudio(this.audioScope)) != null ? _a : findAudio(this.cardEl));
   }
   // -- grading ------------------------------------------------------------
@@ -1938,6 +1999,7 @@ var FlashcardBlock = class extends import_obsidian6.MarkdownRenderChild {
     /** Guards against a slow queue build landing after the block is gone. */
     this.generation = 0;
     this.ref = parseDeck(source);
+    this.speed = parseSpeed(source);
   }
   onload() {
     this.containerEl.addClass("fc-block");
@@ -1986,6 +2048,7 @@ var FlashcardBlock = class extends import_obsidian6.MarkdownRenderChild {
     const host = this.containerEl.createDiv();
     this.view = new ReviewView(this.plugin.app, this.plugin, host, this.deck, queue, {
       bindKey: (hotkey, run) => this.keys.push({ hotkey, run }),
+      playbackRate: this.speed,
       // No close: a block stays on the page. When the queue runs dry it
       // goes back to the message rather than stranding a summary.
       onEmpty: () => {
@@ -2154,6 +2217,24 @@ function parseDeck(source) {
     const deck = normaliseDeck(value.trim().replace(/^["']|["']$/g, ""));
     if (deck.length > 0)
       return deck;
+  }
+  return void 0;
+}
+var MIN_SPEED = 0.25;
+var MAX_SPEED = 4;
+function parseSpeed(source) {
+  for (const raw of source.split("\n")) {
+    const keyed = /^\s*(?:default[\s_-]*)?speed\s*:\s*(.*)$/i.exec(raw);
+    if (!keyed)
+      continue;
+    const value = keyed[1].trim().replace(/^["']|["']$/g, "");
+    const match = /^(\d*\.?\d+)\s*(x|%)?$/i.exec(value);
+    if (!match)
+      return void 0;
+    const n = Number(match[1]) / (match[2] === "%" ? 100 : 1);
+    if (!Number.isFinite(n) || n <= 0)
+      return void 0;
+    return Math.min(MAX_SPEED, Math.max(MIN_SPEED, n));
   }
   return void 0;
 }
@@ -2363,9 +2444,115 @@ function commitOn(input, commit) {
   });
 }
 
-// src/review-modal.ts
+// src/card-actions.ts
 var import_obsidian8 = require("obsidian");
-var ReviewModal = class extends import_obsidian8.Modal {
+function isFresh(card) {
+  return card.fsrs.state === "new" && card.fsrs.reps === 0;
+}
+function registerCardActions(plugin) {
+  plugin.registerMarkdownPostProcessor((el, ctx) => {
+    const card = plugin.store.getByPath(ctx.sourcePath);
+    if (!card)
+      return;
+    const host = el.closest(".markdown-preview-section");
+    if (!(host instanceof HTMLElement))
+      return;
+    if (host.querySelector(".fc-card-actions"))
+      return;
+    host.prepend(buildPanel(plugin, card.id));
+  });
+  plugin.registerEvent(
+    plugin.app.workspace.on("file-menu", (menu, file) => {
+      const card = plugin.store.getByPath(file.path);
+      if (!card)
+        return;
+      menu.addItem(
+        (item) => item.setTitle("Reset card to new").setIcon("rotate-ccw").setDisabled(isFresh(card)).onClick(() => void reset(plugin, card.id))
+      );
+    })
+  );
+}
+function buildPanel(plugin, id) {
+  const panel = document.createElement("div");
+  panel.className = "fc-card-actions";
+  const draw = () => {
+    panel.empty();
+    const card = plugin.store.get(id);
+    if (!card) {
+      panel.createSpan({ cls: "fc-card-actions-summary", text: "Card not indexed." });
+      return;
+    }
+    const { fsrs: fsrs2 } = card;
+    const deck = plugin.decks.resolve(card.deck).name;
+    panel.createSpan({
+      cls: "fc-card-actions-summary",
+      text: isFresh(card) ? `${deck} \xB7 new, never reviewed` : `${deck} \xB7 ${fsrs2.state} \xB7 ${fsrs2.reps} reps, ${fsrs2.lapses} lapses \xB7 due ${fsrs2.due.slice(0, 10)}`
+    });
+    const button = new import_obsidian8.ButtonComponent(panel).setButtonText("Reset card to new");
+    if (isFresh(card)) {
+      button.setDisabled(true).setTooltip("Nothing to reset \u2014 this card has no history");
+      return;
+    }
+    button.setTooltip("Clears every fsrs_ field through FSRS, not just fsrs_state");
+    button.onClick(async () => {
+      button.setDisabled(true);
+      await reset(plugin, id);
+      draw();
+    });
+  };
+  draw();
+  return panel;
+}
+async function reset(plugin, id) {
+  try {
+    await plugin.api.forgetCard(id);
+    new import_obsidian8.Notice(`Reset ${id} to new.`);
+    return true;
+  } catch (err) {
+    new import_obsidian8.Notice(`Could not reset the card: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+// src/confirm.ts
+var import_obsidian9 = require("obsidian");
+function confirm(app, options) {
+  return new Promise((resolve) => {
+    new ConfirmModal(app, options, resolve).open();
+  });
+}
+var ConfirmModal = class extends import_obsidian9.Modal {
+  constructor(app, options, respond) {
+    super(app);
+    this.options = options;
+    this.respond = respond;
+    /** Guards against resolving twice when the button also triggers onClose. */
+    this.answered = false;
+  }
+  onOpen() {
+    this.titleEl.setText(this.options.title);
+    this.contentEl.createEl("p", { text: this.options.body });
+    new import_obsidian9.Setting(this.contentEl).addButton(
+      (button) => button.setButtonText("Cancel").onClick(() => this.finish(false))
+    ).addButton(
+      (button) => button.setButtonText(this.options.cta).setWarning().onClick(() => this.finish(true))
+    );
+  }
+  onClose() {
+    this.finish(false);
+  }
+  finish(ok) {
+    if (this.answered)
+      return;
+    this.answered = true;
+    this.respond(ok);
+    this.close();
+  }
+};
+
+// src/review-modal.ts
+var import_obsidian10 = require("obsidian");
+var ReviewModal = class extends import_obsidian10.Modal {
   constructor(app, plugin, queue, deck) {
     super(app);
     this.view = new ReviewView(app, plugin, this.contentEl, deck, queue, {
@@ -4389,7 +4576,7 @@ function trim(n) {
 }
 
 // src/store.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 var CardStore = class {
   constructor(app, root, folderForDeck = () => null) {
     this.app = app;
@@ -4435,7 +4622,7 @@ var CardStore = class {
     this.refs.push(
       this.app.vault.on("rename", (file, oldPath) => {
         this.forgetPath(oldPath);
-        if (file instanceof import_obsidian9.TFile) {
+        if (file instanceof import_obsidian11.TFile) {
           this.indexFile(file, this.app.metadataCache.getFileCache(file));
         }
         this.notify();
@@ -4503,6 +4690,12 @@ var CardStore = class {
     var _a;
     return (_a = this.byId.get(id)) != null ? _a : null;
   }
+  /** The card backed by a note path, or `null` if the note is not a card. */
+  getByPath(path) {
+    var _a;
+    const id = this.byPath.get(path);
+    return id === void 0 ? null : (_a = this.byId.get(id)) != null ? _a : null;
+  }
   /** Every indexed card. */
   all() {
     return [...this.byId.values()];
@@ -4528,7 +4721,7 @@ var CardStore = class {
     if (!record)
       return null;
     const file = this.app.vault.getAbstractFileByPath(record.path);
-    if (!(file instanceof import_obsidian9.TFile))
+    if (!(file instanceof import_obsidian11.TFile))
       return null;
     const raw = await this.app.vault.cachedRead(file);
     return parseBody(splitNote(raw).body);
@@ -4550,7 +4743,7 @@ var CardStore = class {
     const hash = contentHash(generator, body);
     const existing = this.byId.get(spec.id);
     const file = existing ? this.app.vault.getAbstractFileByPath(existing.path) : null;
-    if (existing && file instanceof import_obsidian9.TFile) {
+    if (existing && file instanceof import_obsidian11.TFile) {
       if (!regenerate)
         return "unchanged";
       const cache = this.app.metadataCache.getFileCache(file);
@@ -4562,7 +4755,7 @@ var CardStore = class {
       const next = composeNote(generator, state, preservedKeys(split.frontmatter), body, hash);
       if (next !== raw)
         await this.app.vault.modify(file, next);
-      const desired = (0, import_obsidian9.normalizePath)(cardPath(folder, spec.id));
+      const desired = (0, import_obsidian11.normalizePath)(cardPath(folder, spec.id));
       if (desired !== file.path) {
         await this.ensureFolder(folder);
         await this.app.fileManager.renameFile(file, desired).catch(() => void 0);
@@ -4570,9 +4763,9 @@ var CardStore = class {
       this.indexFile(file, this.app.metadataCache.getFileCache(file));
       return "updated";
     }
-    const path = (0, import_obsidian9.normalizePath)(cardPath(folder, spec.id));
+    const path = (0, import_obsidian11.normalizePath)(cardPath(folder, spec.id));
     const atPath = this.app.vault.getAbstractFileByPath(path);
-    if (atPath instanceof import_obsidian9.TFile) {
+    if (atPath instanceof import_obsidian11.TFile) {
       const raw = await this.app.vault.read(atPath);
       const split = splitNote(raw);
       const state = this.stateFrom(atPath, freshState);
@@ -4611,7 +4804,7 @@ var CardStore = class {
     if (!record)
       return null;
     const file = this.app.vault.getAbstractFileByPath(record.path);
-    if (!(file instanceof import_obsidian9.TFile))
+    if (!(file instanceof import_obsidian11.TFile))
       return null;
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       Object.assign(fm, fsrsFrontmatter(state));
@@ -4628,7 +4821,7 @@ var CardStore = class {
       if (!record)
         continue;
       const file = this.app.vault.getAbstractFileByPath(record.path);
-      if (file instanceof import_obsidian9.TFile) {
+      if (file instanceof import_obsidian11.TFile) {
         await this.app.fileManager.trashFile(file);
         removed += 1;
       }
@@ -4640,17 +4833,17 @@ var CardStore = class {
   }
   /** Create a folder and every missing parent above it. */
   async ensureFolder(folder) {
-    const path = (0, import_obsidian9.normalizePath)(folder);
+    const path = (0, import_obsidian11.normalizePath)(folder);
     if (path === "" || path === "/")
       return;
     const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof import_obsidian9.TFolder)
+    if (existing instanceof import_obsidian11.TFolder)
       return;
     const parts = path.split("/").filter(Boolean);
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      if (this.app.vault.getAbstractFileByPath(current) instanceof import_obsidian9.TFolder)
+      if (this.app.vault.getAbstractFileByPath(current) instanceof import_obsidian11.TFolder)
         continue;
       await this.app.vault.createFolder(current).catch(() => void 0);
     }
@@ -4658,7 +4851,7 @@ var CardStore = class {
 };
 
 // src/settings.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var DEFAULT_SETTINGS = {
   root: "flashcards",
   autoplayAudio: true,
@@ -4668,7 +4861,7 @@ var DEFAULT_SETTINGS = {
   hotkeys: { ...DEFAULT_HOTKEYS },
   deckGlobals: structuredClone(DEFAULT_GLOBAL)
 };
-var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
+var FlashcardCoreSettingTab = class extends import_obsidian12.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -4679,7 +4872,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian10.Setting(containerEl).setName("Card folder").setDesc(
+    new import_obsidian12.Setting(containerEl).setName("Card folder").setDesc(
       "Root folder for decks. Each deck is a subfolder; card notes and their media live together inside it."
     ).addText(
       (text) => text.setPlaceholder("flashcards").setValue(this.plugin.settings.root).onChange(async (value) => {
@@ -4688,20 +4881,20 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         await this.plugin.applyRoot();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Review").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Autoplay audio").setDesc("Play the first audio embed as soon as a side is revealed.").addToggle(
+    new import_obsidian12.Setting(containerEl).setName("Review").setHeading();
+    new import_obsidian12.Setting(containerEl).setName("Autoplay audio").setDesc("Play the first audio embed as soon as a side is revealed.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.autoplayAudio).onChange(async (value) => {
         this.plugin.settings.autoplayAudio = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Show predicted intervals").setDesc("Label each grade button with when the card would next come up.").addToggle(
+    new import_obsidian12.Setting(containerEl).setName("Show predicted intervals").setDesc("Label each grade button with when the card would next come up.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showIntervals).onChange(async (value) => {
         this.plugin.settings.showIntervals = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Bring back cards graded Again").setDesc(
+    new import_obsidian12.Setting(containerEl).setName("Bring back cards graded Again").setDesc(
       `How many cards to put between a card you got wrong and its return, doubling each time it comes back (up to ${MAX_SESSION_RETRIES} returns). Set to 0 to run straight through the queue instead.`
     ).addText(
       (text) => text.setPlaceholder(String(DEFAULT_SESSION_CONFIG.againGap)).setValue(String(this.plugin.settings.againGap)).onChange(async (value) => {
@@ -4712,7 +4905,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("New cards per batch").setDesc(
+    new import_obsidian12.Setting(containerEl).setName("New cards per batch").setDesc(
       "How many unseen cards to work on at once. A new card is only introduced once one already in the batch has been recalled \u2014 graded anything but Again. Set to 0 to introduce every new card the daily limit allows."
     ).addText(
       (text) => text.setPlaceholder(String(DEFAULT_SESSION_CONFIG.newBatchSize)).setValue(String(this.plugin.settings.newBatchSize)).onChange(async (value) => {
@@ -4724,13 +4917,13 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
       })
     );
     this.displayHotkeys(containerEl);
-    new import_obsidian10.Setting(containerEl).setName("Decks").setHeading();
+    new import_obsidian12.Setting(containerEl).setName("Decks").setHeading();
     const global = this.plugin.decks.global();
     containerEl.createEl("p", {
       cls: "fc-settings-summary",
       text: "A deck is a folder holding a flashcard-core-deck.md note, and that note's frontmatter holds the deck's limits. Open a deck below to change them; the values here apply to any field a deck note leaves unset."
     });
-    new import_obsidian10.Setting(containerEl).setName("Global new-card cap").setDesc("Maximum introductions per day across all decks. Leave empty for no cap.").addText(
+    new import_obsidian12.Setting(containerEl).setName("Global new-card cap").setDesc("Maximum introductions per day across all decks. Leave empty for no cap.").addText(
       (text) => text.setPlaceholder("no cap").setValue(global.new_per_day_cap === null ? "" : String(global.new_per_day_cap)).onChange(async (value) => {
         const parsed = value.trim() === "" ? null : Number(value);
         if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0))
@@ -4738,7 +4931,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         await this.plugin.decks.setGlobal({ new_per_day_cap: parsed });
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Global review cap").setDesc("Maximum reviews per day across all decks. Leave empty for no cap.").addText(
+    new import_obsidian12.Setting(containerEl).setName("Global review cap").setDesc("Maximum reviews per day across all decks. Leave empty for no cap.").addText(
       (text) => text.setPlaceholder("no cap").setValue(global.reviews_per_day_cap === null ? "" : String(global.reviews_per_day_cap)).onChange(async (value) => {
         const parsed = value.trim() === "" ? null : Number(value);
         if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0))
@@ -4746,7 +4939,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         await this.plugin.decks.setGlobal({ reviews_per_day_cap: parsed });
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Day starts at").setDesc("Hour the review day rolls over, so a late-night session counts as one day.").addDropdown((drop) => {
+    new import_obsidian12.Setting(containerEl).setName("Day starts at").setDesc("Hour the review day rolls over, so a late-night session counts as one day.").addDropdown((drop) => {
       for (let h = 0; h < 24; h++)
         drop.addOption(String(h), `${String(h).padStart(2, "0")}:00`);
       drop.setValue(String(global.day_start_hour)).onChange(async (value) => {
@@ -4755,7 +4948,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         this.plugin.ledger.setDayStartHour(hour);
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Default new cards per day").setDesc("Used by any deck whose note leaves new_per_day unset.").addText(
+    new import_obsidian12.Setting(containerEl).setName("Default new cards per day").setDesc("Used by any deck whose note leaves new_per_day unset.").addText(
       (text) => text.setValue(String(global.defaults.new_per_day)).onChange(async (value) => {
         const parsed = Number(value);
         if (!Number.isFinite(parsed) || parsed < 0)
@@ -4765,7 +4958,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         });
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Default reviews per day").setDesc("Used by any deck whose note leaves max_reviews_per_day unset.").addText(
+    new import_obsidian12.Setting(containerEl).setName("Default reviews per day").setDesc("Used by any deck whose note leaves max_reviews_per_day unset.").addText(
       (text) => text.setValue(String(global.defaults.max_reviews_per_day)).onChange(async (value) => {
         const parsed = Number(value);
         if (!Number.isFinite(parsed) || parsed < 0)
@@ -4776,13 +4969,13 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
       })
     );
     this.displayDeckList(containerEl);
-    new import_obsidian10.Setting(containerEl).setName("Today").setHeading();
+    new import_obsidian12.Setting(containerEl).setName("Today").setHeading();
     const record = this.plugin.ledger.current();
     const summary = containerEl.createDiv({ cls: "fc-settings-summary" });
     summary.createEl("p", {
       text: `Review day ${record.day}: ${record.introduced_total} introduced, ${record.reviews_total} reviewed.`
     });
-    new import_obsidian10.Setting(containerEl).setName("Reset today's counters").setDesc("Clears introduction and review counts for the current review day.").addButton(
+    new import_obsidian12.Setting(containerEl).setName("Reset today's counters").setDesc("Clears introduction and review counts for the current review day.").addButton(
       (button) => button.setButtonText("Reset").setWarning().onClick(async () => {
         await this.plugin.ledger.reset();
         this.display();
@@ -4799,7 +4992,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
    * spotting a deck that has cards but no note to configure them with.
    */
   displayDeckList(containerEl) {
-    new import_obsidian10.Setting(containerEl).setName("Your decks").setHeading();
+    new import_obsidian12.Setting(containerEl).setName("Your decks").setHeading();
     const decks = this.plugin.api.listDecks();
     if (decks.length === 0) {
       containerEl.createEl("p", {
@@ -4811,7 +5004,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
     for (const deck of decks) {
       const config = this.plugin.decks.resolve(deck);
       const cards = this.plugin.store.inDeck(deck).length;
-      const setting = new import_obsidian10.Setting(containerEl).setClass("fc-deck-row");
+      const setting = new import_obsidian12.Setting(containerEl).setClass("fc-deck-row");
       setting.setName(config.registered ? config.name : deck);
       setting.setDesc(
         config.registered ? `${deck} \xB7 ${cards} cards \xB7 ${config.new_per_day} new/day, ${config.max_reviews_per_day} reviews/day` + (config.enabled ? "" : " \xB7 disabled") : `${deck} \xB7 ${cards} cards \xB7 \u26A0 no deck note, so it is using the defaults above`
@@ -4838,15 +5031,15 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
     const cards = this.plugin.store.inDeck(deck);
     const folder = folderForCards(cards.map((card) => card.path));
     if (folder === null) {
-      new import_obsidian10.Notice(`"${deck}" has no cards, so there is no folder to put its note in.`);
+      new import_obsidian12.Notice(`"${deck}" has no cards, so there is no folder to put its note in.`);
       return;
     }
     try {
       const note = await this.plugin.api.createDeckNote(folder, deck);
-      new import_obsidian10.Notice(`Created ${note.path}`);
+      new import_obsidian12.Notice(`Created ${note.path}`);
       this.display();
     } catch (err) {
-      new import_obsidian10.Notice(`Could not create the deck note: ${String(err)}`);
+      new import_obsidian12.Notice(`Could not create the deck note: ${String(err)}`);
     }
   }
   hide() {
@@ -4854,7 +5047,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
   }
   displayHotkeys(containerEl) {
     var _a;
-    new import_obsidian10.Setting(containerEl).setName("Review hotkeys").setHeading();
+    new import_obsidian12.Setting(containerEl).setName("Review hotkeys").setHeading();
     containerEl.createEl("p", {
       cls: "fc-settings-summary",
       text: "These apply inside the review modal only. Obsidian's own Hotkeys pane cannot bind them, because they have to mean different things before and after the answer is revealed. Click a key, then press the one you want; Backspace clears it."
@@ -4865,7 +5058,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
       const binding = hotkeys[action.id];
       const clashes = (_a = conflicts.get(binding.trim().toLowerCase())) != null ? _a : [];
       const others = clashes.filter((id) => id !== action.id).map((id) => labelFor2(id));
-      const setting = new import_obsidian10.Setting(containerEl).setName(action.name);
+      const setting = new import_obsidian12.Setting(containerEl).setName(action.name);
       setting.setDesc(
         others.length > 0 ? `${action.desc}  \u26A0 Also bound to: ${others.join(", ")}.` : action.desc
       );
@@ -4885,7 +5078,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
         })
       );
     }
-    new import_obsidian10.Setting(containerEl).setName("Reset all hotkeys").setDesc("Restores every review key to its default.").addButton(
+    new import_obsidian12.Setting(containerEl).setName("Reset all hotkeys").setDesc("Restores every review key to its default.").addButton(
       (button) => button.setButtonText("Reset all").onClick(async () => {
         this.plugin.settings.hotkeys = { ...DEFAULT_HOTKEYS };
         await this.plugin.saveSettings();
@@ -4923,7 +5116,7 @@ var FlashcardCoreSettingTab = class extends import_obsidian10.PluginSettingTab {
       void this.plugin.saveSettings().then(() => {
         this.display();
         if (cleared)
-          new import_obsidian10.Notice(`flashcard-core: ${labelFor2(actionId)} is now unbound.`);
+          new import_obsidian12.Notice(`flashcard-core: ${labelFor2(actionId)} is now unbound.`);
       });
     };
     this.capturing = onKey;
@@ -4951,7 +5144,7 @@ function labelFor2(actionId) {
 }
 
 // main.ts
-var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
+var FlashcardCorePlugin = class extends import_obsidian13.Plugin {
   async onload() {
     await this.loadSettings();
     this.scheduler = new Scheduler();
@@ -4998,6 +5191,7 @@ var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
     this.registerMarkdownCodeBlockProcessor("flashcard-deck-settings", (source, el, ctx) => {
       ctx.addChild(new DeckSettingsBlock(this, source, el, ctx));
     });
+    registerCardActions(this);
     this.addSettingTab(new FlashcardCoreSettingTab(this.app, this));
     this.registerCommands();
     this.addRibbonIcon("layers", "Review flashcards", () => {
@@ -5044,6 +5238,33 @@ var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
       void this.api.startReview(deck);
     }).open();
   }
+  /**
+   * Confirm, then reset a deck. Confirmation is not optional here: this
+   * throws away real review history, and a deck picker is one keystroke away
+   * from the wrong deck.
+   */
+  async confirmResetDeck(deck) {
+    const config = this.decks.resolve(deck);
+    const cards = this.store.inDeck(deck);
+    const touched = cards.filter((c) => !(c.fsrs.state === "new" && c.fsrs.reps === 0));
+    if (touched.length === 0) {
+      new import_obsidian13.Notice(`"${config.name}" has no progress to reset \u2014 all ${cards.length} cards are new.`);
+      return;
+    }
+    const ok = await confirm(this.app, {
+      title: `Start "${config.name}" over?`,
+      body: `This resets ${touched.length} of ${cards.length} cards to new and clears today's counters for the deck. Scheduling history for those cards is discarded and cannot be recovered. Card notes and their content are not touched.`,
+      cta: `Reset ${touched.length} cards`
+    });
+    if (!ok)
+      return;
+    try {
+      const n = await this.api.resetDeck(deck);
+      new import_obsidian13.Notice(`flashcard-core: reset ${n} cards in "${config.name}".`);
+    } catch (err) {
+      new import_obsidian13.Notice(`flashcard-core: ${describe2(err)}`);
+    }
+  }
   // -- commands -----------------------------------------------------------
   registerCommands() {
     this.addCommand({
@@ -5073,7 +5294,7 @@ var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
       name: "Rebuild card index",
       callback: () => {
         this.store.rebuild();
-        new import_obsidian11.Notice(`flashcard-core: indexed ${this.store.all().length} cards.`);
+        new import_obsidian13.Notice(`flashcard-core: indexed ${this.store.all().length} cards.`);
       }
     });
     this.addCommand({
@@ -5083,7 +5304,7 @@ var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
         new DeckPickerModal(this.app, this, (deck) => {
           const stats = this.api.getDeckStats(deck != null ? deck : "");
           const { counts } = stats;
-          new import_obsidian11.Notice(
+          new import_obsidian13.Notice(
             [
               deck === void 0 ? "All decks" : this.decks.resolve(deck).name,
               `due now: ${stats.due_now}`,
@@ -5107,15 +5328,15 @@ var FlashcardCorePlugin = class extends import_obsidian11.Plugin {
           const index = new Map(this.store.all().map((c) => [c.id, c]));
           const reasons = blockedBy(card, index);
           if (card.fsrs.state !== "new") {
-            new import_obsidian11.Notice(`${card.id} is not new (state: ${card.fsrs.state}).`, 8e3);
+            new import_obsidian13.Notice(`${card.id} is not new (state: ${card.fsrs.state}).`, 8e3);
           } else if (reasons.length === 0) {
             const stats = this.api.getDeckStats(card.deck);
-            new import_obsidian11.Notice(
+            new import_obsidian13.Notice(
               stats.new_remaining > 0 ? `${card.id} is eligible; it is queued behind cards with a lower fc_new_order.` : `${card.id} is eligible, but ${card.deck} has no new cards left today.`,
               8e3
             );
           } else {
-            new import_obsidian11.Notice(`${card.id} is gated by:
+            new import_obsidian13.Notice(`${card.id} is gated by:
 ${reasons.join("\n")}`, 1e4);
           }
         }
@@ -5130,9 +5351,25 @@ ${reasons.join("\n")}`, 1e4);
         if (!card)
           return false;
         if (!checking) {
-          void this.api.forgetCard(card.id).then(() => new import_obsidian11.Notice(`flashcard-core: ${card.id} reset to new.`)).catch((err) => new import_obsidian11.Notice(`flashcard-core: ${describe2(err)}`));
+          void this.api.forgetCard(card.id).then(() => new import_obsidian13.Notice(`flashcard-core: ${card.id} reset to new.`)).catch((err) => new import_obsidian13.Notice(`flashcard-core: ${describe2(err)}`));
         }
         return true;
+      }
+    });
+    this.addCommand({
+      id: "reset-deck",
+      name: "Start a deck over\u2026",
+      callback: () => {
+        new DeckPickerModal(
+          this.app,
+          this,
+          (deck) => {
+            if (deck === void 0)
+              return;
+            void this.confirmResetDeck(deck);
+          },
+          { includeAll: false, placeholder: "Start which deck over?" }
+        ).open();
       }
     });
     this.addCommand({
@@ -5140,7 +5377,7 @@ ${reasons.join("\n")}`, 1e4);
       name: "List registered new-card order providers",
       callback: () => {
         const providers = this.core.listProviders();
-        new import_obsidian11.Notice(
+        new import_obsidian13.Notice(
           providers.length === 0 ? "flashcard-core: no order providers registered; decks use fc_new_order." : providers.map((p) => `${p.id} \u2192 ${p.deck || "(all decks)"}`).join("\n"),
           8e3
         );
@@ -5155,7 +5392,7 @@ ${reasons.join("\n")}`, 1e4);
   activeCard() {
     var _a;
     const file = this.app.workspace.getActiveFile();
-    if (!(file instanceof import_obsidian11.TFile))
+    if (!(file instanceof import_obsidian13.TFile))
       return null;
     return (_a = this.store.all().find((card) => card.path === file.path)) != null ? _a : null;
   }
@@ -5172,7 +5409,7 @@ ${reasons.join("\n")}`, 1e4);
   async createBaseFile() {
     const path = `${this.settings.root}/Flashcards.base`;
     if (await this.app.vault.adapter.exists(path)) {
-      new import_obsidian11.Notice(`flashcard-core: ${path} already exists.`);
+      new import_obsidian13.Notice(`flashcard-core: ${path} already exists.`);
       return;
     }
     const folder = this.settings.root;
@@ -5180,7 +5417,7 @@ ${reasons.join("\n")}`, 1e4);
       await this.app.vault.createFolder(folder).catch(() => void 0);
     }
     await this.app.vault.create(path, BASE_TEMPLATE);
-    new import_obsidian11.Notice(`flashcard-core: created ${path}.`);
+    new import_obsidian13.Notice(`flashcard-core: created ${path}.`);
   }
 };
 function describe2(err) {
@@ -5190,6 +5427,8 @@ var BASE_TEMPLATE = `filters:
   and:
     - 'fc == "card"'
 formulas:
+  state: 'if(fsrs_state, fsrs_state, "new")'
+  reps: 'if(fsrs_reps, fsrs_reps, 0)'
   overdue_days: 'if(fsrs_due, (now() - date(fsrs_due)).days.round(1))'
 properties:
   deck:
@@ -5204,6 +5443,10 @@ properties:
     displayName: Lapses
   source_plugin:
     displayName: Source
+  formula.state:
+    displayName: State
+  formula.reps:
+    displayName: Reps
   formula.overdue_days:
     displayName: Overdue (d)
 views:
@@ -5211,13 +5454,13 @@ views:
     name: Due now
     filters:
       and:
-        - 'fsrs_state != "new"'
+        - 'fsrs_reps > 0'
         - 'date(fsrs_due) <= now()'
     order:
       - file.name
       - deck
       - fsrs_due
-      - fsrs_state
+      - formula.state
       - formula.overdue_days
     sort:
       - property: fsrs_due
@@ -5229,16 +5472,16 @@ views:
       direction: ASC
     order:
       - file.name
-      - fsrs_state
+      - formula.state
       - fsrs_due
       - fsrs_stability
-      - fsrs_reps
+      - formula.reps
       - fsrs_lapses
   - type: table
     name: New backlog
     filters:
-      and:
-        - 'fsrs_state == "new"'
+      not:
+        - 'fsrs_reps > 0'
     order:
       - file.name
       - deck

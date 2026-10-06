@@ -660,6 +660,23 @@ The block then has exactly two states:
   button and a **Change deck** button. The counts are there because "nothing is
   due" and "today's cap is spent" look identical from the outside.
 
+A block can also slow its audio down — for a long sentence you can nearly
+follow and just need said slower:
+
+````markdown
+```flashcard
+deck: MSA vocabulary
+default speed: 0.75
+```
+````
+
+Every audio player on the card starts at that speed: autoplay, **Replay audio**
+and the player's own play button alike, with pitch kept so slowed speech still
+sounds like the speaker. `speed:` is the short spelling, and `0.75x` and `75%`
+both work. It is clamped to 0.25–4; a value that is not a number is ignored and
+the audio plays as recorded. The speed belongs to the block, not the deck, so
+the same deck can be reviewed at full speed in the modal or another note.
+
 Like the deck-scoped commands, `deck:` covers the deck and everything under it:
 `language` reviews `language/arabic/al-ayyam-ch1` too.
 
