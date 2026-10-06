@@ -575,24 +575,44 @@ There is no browse UI here, by design. Run **Flashcard Core: Create a Bases view
 for the collection** to drop a `Flashcards.base` into the root folder with four
 views: *Due now*, *By deck*, *New backlog*, and *Leeches*.
 
+### Never filter on `fsrs_state`
+
+A card that has not been reviewed carries **no `fsrs_*` keys at all** — the
+plugin writes them on the first grade. In Bases an absent property is neither
+equal nor unequal to a value, so both of these are traps:
+
+| Filter | What you expect | What you get |
+| --- | --- | --- |
+| `fsrs_state == "new"` | the new backlog | **nothing** |
+| `fsrs_state != "new"` | cards in rotation | **every card** |
+
+Use `fsrs_reps > 0` for "has been reviewed" and `not: [fsrs_reps > 0]` for its
+complement: a missing number simply fails the comparison, which is the
+behaviour you want. For display, normalise with a formula —
+`state: 'if(fsrs_state, fsrs_state, "new")'` — so a never-reviewed card reads
+as `new` instead of blank.
+
 The essentials:
 
 ```yaml
 filters:
   and:
     - 'fc == "card"'
+formulas:
+  state: 'if(fsrs_state, fsrs_state, "new")'
+  reps: 'if(fsrs_reps, fsrs_reps, 0)'
 views:
   - type: table
     name: Due now
     filters:
       and:
-        - 'fsrs_state != "new"'
+        - 'fsrs_reps > 0'
         - 'date(fsrs_due) <= now()'
     order:
       - file.name
       - deck
       - fsrs_due
-      - fsrs_state
+      - formula.state
     sort:
       - property: fsrs_due
         direction: ASC
@@ -653,6 +673,27 @@ message on screen.
 
 ---
 
+## Resetting a card
+
+Every card note carries a panel above its body — the deck, the card's state,
+its reps and lapses, and a **Reset card to new** button. It is injected by a
+post-processor, not written into the note, because card bodies are
+generator-owned and rewritten on every regeneration.
+
+The same action is on the note's context menu, which is what to use in editing
+view or on a row in a Base, where the panel does not render.
+
+Reset goes through FSRS's own `forget()`, so it clears `fsrs_stability`,
+`fsrs_difficulty`, `fsrs_reps`, `fsrs_lapses`, `fsrs_scheduled_days`, and
+`fsrs_learning_steps` along with `fsrs_state`. **Editing `fsrs_state` by hand
+is not equivalent** — the card does return to the new queue, but `reps` and
+`lapses` are passed through to FSRS untouched, so its history stays wrong
+forever. `fsrs_last_review` is deliberately left at the reset time; a new
+card's first schedule ignores it, so it reads as "last touched".
+
+To reset a whole deck at once, use **Start a deck over…** instead of clicking
+through it card by card.
+
 ## Commands
 
 | Command | What it does |
@@ -664,6 +705,7 @@ message on screen.
 | Show deck statistics | Counts and remaining daily budget. |
 | Why is this card not being introduced? | Names the gating prerequisites, or the limit that is in the way. Start here when a card will not appear. |
 | Reset the active card to new | Discards its scheduling history. |
+| Start a deck over… | Every card in one deck back to `new`, and that deck's counters for today cleared. Asks first; cannot be undone. |
 | List registered new-card order providers | Which generator is ordering which deck. |
 | Create a Bases view for the collection | Writes the starter `.base`. |
 

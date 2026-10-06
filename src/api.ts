@@ -212,6 +212,23 @@ export class FlashcardCore implements FlashcardCoreAPI {
 		return updated;
 	}
 
+	async resetDeck(deck: string): Promise<number> {
+		const key = normaliseDeck(deck);
+		const cards = this.deps.store.inDeck(key);
+		let reset = 0;
+		for (const card of cards) {
+			// Skip untouched cards: rewriting a note that is already `new` would
+			// churn the file for nothing.
+			if (card.fsrs.state === "new" && card.fsrs.reps === 0) continue;
+			const params = this.deps.decks.resolve(card.deck).fsrs_params;
+			const next = this.deps.scheduler.forget(card.fsrs, params);
+			if (await this.deps.store.writeState(card.id, next)) reset += 1;
+		}
+		await this.deps.ledger.clearDeck(key);
+		this.deps.scheduler.invalidate();
+		return reset;
+	}
+
 	// -- configuration ------------------------------------------------------
 
 	getDeckConfig(deck: string): ResolvedDeckConfig {

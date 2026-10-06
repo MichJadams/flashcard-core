@@ -585,6 +585,17 @@ export interface FlashcardCoreAPI {
 	/** Reset a card to `new`, discarding its scheduling history. */
 	forgetCard(id: string): Promise<CardRecord>;
 
+	/**
+	 * Reset a whole deck: every card back to `new`, and today's counters for
+	 * that deck cleared so it can be started again immediately.
+	 *
+	 * Discards the deck's scheduling history and cannot be undone. Card notes,
+	 * content, and ids are untouched.
+	 *
+	 * @returns how many cards were reset.
+	 */
+	resetDeck(deck: string): Promise<number>;
+
 	// -- configuration ------------------------------------------------------
 
 	/** Config for a deck, with unset fields filled in from the global defaults. */

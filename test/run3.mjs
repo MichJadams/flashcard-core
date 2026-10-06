@@ -490,4 +490,90 @@ await t("re-pointing a deck's folder moves its cards on regeneration", async () 
 	assert.ok(f.files.has("flashcards/moved/blossom__note-reading__m.md"), "followed the note");
 });
 
+// The whole point of a reset button over a hand-edit: `fsrs_state` is one of
+// eight fields, and the other seven are what make a card's history.
+await t("forgetCard clears every fsrs field, not just the state", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a")]));
+	const id = "blossom:note-reading:a";
+	await f.core.reviewCard(id, 3);
+	await f.core.reviewCard(id, 1);
+	const dirty = f.core.getCard(id).fsrs;
+	// Note: Again from `learning` is not a lapse, so only these three are set.
+	assert.ok(dirty.reps > 0, "reps exist first");
+	assert.ok(dirty.stability > 0, "stability exists first");
+	assert.ok(dirty.last_review !== null, "last_review exists first");
+
+	await f.core.forgetCard(id);
+
+	const clean = f.core.getCard(id).fsrs;
+	assert.equal(clean.state, "new");
+	assert.equal(clean.reps, 0, "reps");
+	assert.equal(clean.lapses, 0, "lapses");
+	assert.equal(clean.stability, 0, "stability");
+	assert.equal(clean.difficulty, 0, "difficulty");
+	assert.equal(clean.scheduled_days, 0, "scheduled_days");
+	assert.equal(clean.learning_steps, 0, "learning_steps");
+
+	// ts-fsrs stamps `last_review` with the moment of the reset rather than
+	// clearing it. Left as the library has it: a `new` card's first schedule
+	// ignores elapsed time, so this reads as "when it was last touched" and
+	// changes nothing. `isFresh` keys off state + reps for that reason.
+	assert.ok(clean.last_review !== null, "last_review is the reset time, by design");
+
+	// And it is on disk, not just in the index.
+	const fm = JSON.parse(/^---\n([\s\S]*?)\n---/.exec(
+		f.files.get("flashcards/piano/note-reading/blossom__note-reading__a.md"))[1]);
+	assert.equal(fm.fsrs_state, "new");
+	assert.equal(fm.fsrs_reps, 0);
+	assert.equal(fm.fsrs_stability, 0);
+});
+
+await t("getByPath finds a card by its note, and only a card", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a")]));
+	const path = "flashcards/piano/note-reading/blossom__note-reading__a.md";
+	assert.equal(f.store.getByPath(path)?.id, "blossom:note-reading:a");
+	assert.equal(f.store.getByPath("flashcards/piano/note-reading/flashcard-core-deck.md"), null);
+	assert.equal(f.store.getByPath("nope.md"), null);
+});
+
+await t("resetDeck sends a deck back to new and frees today's budget", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a", { new_order: 1 }), card("b", { new_order: 2 }), card("c", { new_order: 3 })]));
+	await f.core.reviewCard("blossom:note-reading:a", 3);
+	await f.core.reviewCard("blossom:note-reading:b", 3);
+	assert.equal(f.ledger.introduced("piano/note-reading"), 2, "budget spent");
+
+	const n = await f.core.resetDeck("piano/note-reading");
+	assert.equal(n, 2, "only the two touched cards were rewritten");
+	for (const key of ["a", "b", "c"]) {
+		const rec = f.core.getCard(`blossom:note-reading:${key}`);
+		assert.equal(rec.fsrs.state, "new", `${key} is new`);
+		assert.equal(rec.fsrs.reps, 0, `${key} has no reps`);
+	}
+	assert.equal(f.ledger.introduced("piano/note-reading"), 0, "counters cleared");
+	assert.equal(f.ledger.introducedTotal(), 0);
+});
+
+await t("resetDeck leaves other decks alone", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a"), card("z", { deck: "other-deck" })]));
+	await f.core.reviewCard("blossom:note-reading:a", 3);
+	await f.core.reviewCard("blossom:note-reading:z", 3);
+
+	await f.core.resetDeck("piano/note-reading");
+	assert.equal(f.core.getCard("blossom:note-reading:a").fsrs.state, "new");
+	assert.notEqual(f.core.getCard("blossom:note-reading:z").fsrs.state, "new", "other deck untouched");
+	assert.equal(f.ledger.introduced("other-deck"), 1, "and keeps its counters");
+});
+
+await t("resetDeck on an untouched deck rewrites nothing", async () => {
+	const f = await fixture();
+	await f.core.upsertCards(spec([card("a")]));
+	const before = f.files.get("flashcards/piano/note-reading/blossom__note-reading__a.md");
+	assert.equal(await f.core.resetDeck("piano/note-reading"), 0);
+	assert.equal(f.files.get("flashcards/piano/note-reading/blossom__note-reading__a.md"), before);
+});
+
 console.log(`\n${pass} assertions passed`);

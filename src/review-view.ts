@@ -186,8 +186,11 @@ export class ReviewView {
 
 		// Cards return after Again, so a position out of a fixed total would be
 		// a lie. What is left is the number that stays true either way.
+		// The deck's name, never its id: an id is opaque by design and means
+		// nothing to the person reading it mid-review.
+		const deckLabel = this.plugin.decks.resolve(item.card.deck).name;
 		this.progressEl.setText(
-			`${this.session.remaining} left · ${item.card.deck} · ${labelFor(entry)}`,
+			`${this.session.remaining} left · ${deckLabel} · ${labelFor(entry)}`,
 		);
 
 		this.resetRenderHost();

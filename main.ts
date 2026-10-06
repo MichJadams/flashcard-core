@@ -17,6 +17,8 @@ import { DeckPickerModal } from "./src/deck-picker";
 import { DeckSettingsBlock, DeckStatsBlock } from "./src/deck-block";
 import { FlashcardBlock } from "./src/flashcard-block";
 import { DEFAULT_HOTKEYS, withDefaults } from "./src/hotkeys";
+import { registerCardActions } from "./src/card-actions";
+import { confirm } from "./src/confirm";
 import { blockedBy } from "./src/queue";
 import { ReviewModal } from "./src/review-modal";
 import { Scheduler } from "./src/scheduler";
@@ -106,6 +108,9 @@ export default class FlashcardCorePlugin extends Plugin {
 			ctx.addChild(new DeckSettingsBlock(this, source, el, ctx));
 		});
 
+		// State and a reset button on every card note, without touching bodies.
+		registerCardActions(this);
+
 		this.addSettingTab(new FlashcardCoreSettingTab(this.app, this));
 		this.registerCommands();
 
@@ -164,6 +169,39 @@ export default class FlashcardCorePlugin extends Plugin {
 		new DeckPickerModal(this.app, this, (deck) => {
 			void this.api.startReview(deck);
 		}).open();
+	}
+
+	/**
+	 * Confirm, then reset a deck. Confirmation is not optional here: this
+	 * throws away real review history, and a deck picker is one keystroke away
+	 * from the wrong deck.
+	 */
+	private async confirmResetDeck(deck: string): Promise<void> {
+		const config = this.decks.resolve(deck);
+		const cards = this.store.inDeck(deck);
+		const touched = cards.filter((c) => !(c.fsrs.state === "new" && c.fsrs.reps === 0));
+
+		if (touched.length === 0) {
+			new Notice(`"${config.name}" has no progress to reset — all ${cards.length} cards are new.`);
+			return;
+		}
+
+		const ok = await confirm(this.app, {
+			title: `Start "${config.name}" over?`,
+			body:
+				`This resets ${touched.length} of ${cards.length} cards to new and clears today's ` +
+				`counters for the deck. Scheduling history for those cards is discarded and cannot ` +
+				`be recovered. Card notes and their content are not touched.`,
+			cta: `Reset ${touched.length} cards`,
+		});
+		if (!ok) return;
+
+		try {
+			const n = await this.api.resetDeck(deck);
+			new Notice(`flashcard-core: reset ${n} cards in "${config.name}".`);
+		} catch (err) {
+			new Notice(`flashcard-core: ${describe(err)}`);
+		}
 	}
 
 	// -- commands -----------------------------------------------------------
@@ -266,6 +304,22 @@ export default class FlashcardCorePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "reset-deck",
+			name: "Start a deck over…",
+			callback: () => {
+				new DeckPickerModal(
+					this.app,
+					this,
+					(deck) => {
+						if (deck === undefined) return;
+						void this.confirmResetDeck(deck);
+					},
+					{ includeAll: false, placeholder: "Start which deck over?" },
+				).open();
+			},
+		});
+
+		this.addCommand({
 			id: "list-providers",
 			name: "List registered new-card order providers",
 			callback: () => {
@@ -326,11 +380,21 @@ function describe(err: unknown): string {
  *
  * `fc == "card"` is the anchor filter and `deck` is the grouping key — the two
  * frontmatter properties the card format exists to expose.
+ *
+ * Note the `state` and `reps` formulas, and that no filter tests `fsrs_state`
+ * directly. A card that has never been reviewed carries no `fsrs_*` keys at
+ * all, and in Bases an absent property is not equal to `"new"` *and* not
+ * unequal to it — so `fsrs_state == "new"` silently matches nothing while
+ * `fsrs_state != "new"` silently matches everything. `fsrs_reps > 0` is the
+ * reliable test for "has been reviewed", because a missing number just fails
+ * the comparison.
  */
 const BASE_TEMPLATE = `filters:
   and:
     - 'fc == "card"'
 formulas:
+  state: 'if(fsrs_state, fsrs_state, "new")'
+  reps: 'if(fsrs_reps, fsrs_reps, 0)'
   overdue_days: 'if(fsrs_due, (now() - date(fsrs_due)).days.round(1))'
 properties:
   deck:
@@ -345,6 +409,10 @@ properties:
     displayName: Lapses
   source_plugin:
     displayName: Source
+  formula.state:
+    displayName: State
+  formula.reps:
+    displayName: Reps
   formula.overdue_days:
     displayName: Overdue (d)
 views:
@@ -352,13 +420,13 @@ views:
     name: Due now
     filters:
       and:
-        - 'fsrs_state != "new"'
+        - 'fsrs_reps > 0'
         - 'date(fsrs_due) <= now()'
     order:
       - file.name
       - deck
       - fsrs_due
-      - fsrs_state
+      - formula.state
       - formula.overdue_days
     sort:
       - property: fsrs_due
@@ -370,16 +438,16 @@ views:
       direction: ASC
     order:
       - file.name
-      - fsrs_state
+      - formula.state
       - fsrs_due
       - fsrs_stability
-      - fsrs_reps
+      - formula.reps
       - fsrs_lapses
   - type: table
     name: New backlog
     filters:
-      and:
-        - 'fsrs_state == "new"'
+      not:
+        - 'fsrs_reps > 0'
     order:
       - file.name
       - deck

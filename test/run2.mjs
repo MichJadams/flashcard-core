@@ -219,6 +219,29 @@ await t("a counter belongs to exactly one deck", async () => {
 	assert.equal(l.reviews("piano/note-reading"), 0, "reviews are a separate pool");
 });
 
+await t("clearDeck zeroes one deck and keeps the totals honest", async () => {
+	const l = new M.DailyLedger(undefined, 4, async () => {});
+	await l.recordIntroduction("a");
+	await l.recordIntroduction("a");
+	await l.recordIntroduction("b");
+	await l.recordReview("a");
+	assert.equal(l.introducedTotal(), 3);
+
+	await l.clearDeck("a");
+	assert.equal(l.introduced("a"), 0, "cleared");
+	assert.equal(l.reviews("a"), 0, "both pools");
+	assert.equal(l.introduced("b"), 1, "the other deck is untouched");
+	assert.equal(l.introducedTotal(), 1, "totals drop by exactly what was cleared");
+	assert.equal(l.reviewsTotal(), 0);
+});
+
+await t("clearDeck on a deck with no counters is a no-op", async () => {
+	const l = new M.DailyLedger(undefined, 4, async () => {});
+	await l.recordIntroduction("a");
+	await l.clearDeck("never-seen");
+	assert.equal(l.introducedTotal(), 1);
+});
+
 await t("counters reset when the day rolls over", () => {
 	const l = new M.DailyLedger(M.emptyDaily("2020-01-01"), 4, async () => {});
 	assert.equal(l.introduced("piano"), 0);

@@ -113,6 +113,24 @@ export class DailyLedger {
 		await this.persist(record);
 	}
 
+	/**
+	 * Clear one deck's counters for today, leaving every other deck alone.
+	 *
+	 * The totals are decremented rather than recomputed, because they are the
+	 * global caps' own budget and must stay consistent with the per-deck rows.
+	 */
+	async clearDeck(deck: string, now: Date = new Date()): Promise<void> {
+		const record = this.current(now);
+		const key = normaliseDeck(deck);
+		const introduced = record.introduced[key] ?? 0;
+		const reviews = record.reviews[key] ?? 0;
+		delete record.introduced[key];
+		delete record.reviews[key];
+		record.introduced_total = Math.max(0, record.introduced_total - introduced);
+		record.reviews_total = Math.max(0, record.reviews_total - reviews);
+		await this.persist(record);
+	}
+
 	/** Wipe today's counters. Exposed as a command for when a limit was wrong. */
 	async reset(now: Date = new Date()): Promise<void> {
 		this.record = emptyDaily(dayKey(now, this.dayStartHour));

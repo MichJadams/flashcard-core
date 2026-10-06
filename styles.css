@@ -158,6 +158,27 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* Reset panel on a card note. Sits above the card body, so it stays visually
+   subordinate to it — this is chrome, not content. */
+.fc-card-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-3);
+	flex-wrap: wrap;
+	margin-bottom: var(--size-4-4);
+	padding: var(--size-4-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+}
+
+.fc-card-actions-summary {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-family: var(--font-monospace);
+}
+
 /* The deck-note blocks */
 
 .fc-deck-panel {

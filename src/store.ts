@@ -167,6 +167,12 @@ export class CardStore {
 		return this.byId.get(id) ?? null;
 	}
 
+	/** The card backed by a note path, or `null` if the note is not a card. */
+	getByPath(path: string): CardRecord | null {
+		const id = this.byPath.get(path);
+		return id === undefined ? null : (this.byId.get(id) ?? null);
+	}
+
 	/** Every indexed card. */
 	all(): CardRecord[] {
 		return [...this.byId.values()];
